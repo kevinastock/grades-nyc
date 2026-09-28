@@ -44,8 +44,11 @@ function readPreferences(): string[] {
 export function createApp(root: HTMLElement) {
   const navigation = createNavigation(window);
   const lifecycle = new AbortController();
-  const mobile = matchMedia("(max-width: 850px)");
+  const mobile = matchMedia(
+    "(max-width: 850px), (max-width: 1000px) and (orientation: landscape)",
+  );
   let route = navigation.current();
+  let resultsExpanded = !!route.search.query;
   let cameraRequest: CameraRequest = { key: route.key, view: route.camera };
   let selected = readPreferences();
   let data: DataSet | null = null;
@@ -257,6 +260,7 @@ export function createApp(root: HTMLElement) {
     hidden: true,
   });
   const results = el("section", {
+    id: "restaurant-results",
     class: "results-list vstack gap-2",
     "aria-label": "Restaurant search results",
     "data-spinner": "small overlay",
@@ -304,7 +308,24 @@ export function createApp(root: HTMLElement) {
     searchPage,
     preferencesHost,
   );
-  root.replaceChildren(el("div", { class: "app" }, header, main));
+  const app = el("div", { class: "app" }, header, main);
+  root.replaceChildren(app);
+
+  function renderLayout() {
+    const hasDetail = workspace.classList.contains("has-selection");
+    app.classList.toggle("has-detail", hasDetail);
+    workspace.classList.toggle(
+      "results-visible",
+      resultsExpanded && !hasDetail,
+    );
+    results.hidden = mobile.matches && (hasDetail || !resultsExpanded);
+  }
+  function toggleResults() {
+    resultsExpanded = route.id ? true : !resultsExpanded;
+    if (route.id) navigation.close();
+    renderLayout();
+    renderMap();
+  }
 
   function clearFilters() {
     if (!activeFilterCount()) return;
@@ -319,6 +340,11 @@ export function createApp(root: HTMLElement) {
     // Search edits keep keyboard focus on the input, even when leaving details.
     pendingFocus = null;
     detailId = null;
+    if (patch.query !== undefined) {
+      resultsExpanded = true;
+      renderLayout();
+      renderMap();
+    }
     navigation.changeSearch(patch);
   }
   function rememberList() {
@@ -371,7 +397,10 @@ export function createApp(root: HTMLElement) {
       pendingScroll = null;
     }
     if (pendingFocus && !route.id) {
-      (cards.get(pendingFocus)?.node || results).focus({
+      const target = results.hidden
+        ? mapHost.querySelector<HTMLButtonElement>(".map-results-toggle")
+        : cards.get(pendingFocus)?.node || results;
+      target?.focus({
         preventScroll: true,
       });
       pendingFocus = null;
@@ -565,6 +594,7 @@ export function createApp(root: HTMLElement) {
     );
     detail = createRestaurantDetail(detailBody, props);
     detailBody.scrollTop = 0;
+    if (mobile.matches) window.scrollTo(0, 0);
     detailBody.querySelector("h2")?.focus({ preventScroll: true });
   }
   function renderRoute() {
@@ -597,6 +627,7 @@ export function createApp(root: HTMLElement) {
     filtersToggle.textContent = `Filters${count ? ` (${count})` : ""}`;
     workspace.hidden = !data;
     renderDetail();
+    renderLayout();
     if (data && !searching) {
       const props = {
         violations: data.violations,
@@ -629,6 +660,9 @@ export function createApp(root: HTMLElement) {
       restaurants: lookup,
       selectedId: route.id,
       cameraRequest,
+      showResultsToggle: mobile.matches,
+      resultsVisible: !results.hidden,
+      onToggleResults: toggleResults,
       onCamera: (camera) => navigation.update({ camera }),
       onSelect: selectRestaurant,
       onViewport: (value, key) => {
@@ -783,6 +817,8 @@ export function createApp(root: HTMLElement) {
     filtersToggle.hidden = !mobile.matches;
     filters.hidden = mobile.matches;
     filtersToggle.setAttribute("aria-expanded", String(!filters.hidden));
+    renderLayout();
+    renderMap();
   }
   mobile.addEventListener("change", resizeFilters, {
     signal: lifecycle.signal,
@@ -811,7 +847,8 @@ export function createApp(root: HTMLElement) {
   if (!selected.length) navigation.clearWatchFilter();
   resizeFilters();
   renderRoute();
-  if (!route.id && route.view === "search") searchInput.focus();
+  if (!mobile.matches && !route.id && route.view === "search")
+    searchInput.focus();
   void load();
   return {
     destroy() {

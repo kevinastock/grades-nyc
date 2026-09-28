@@ -7,6 +7,7 @@ import maximize from "./icons/feather/maximize.svg?raw";
 import github from "./icons/feather/github.svg?raw";
 import plus from "./icons/feather/plus.svg?raw";
 import minus from "./icons/feather/minus.svg?raw";
+import list from "./icons/feather/list.svg?raw";
 
 // Explicit imports keep the shipped set small; no Feather runtime is needed.
 const icons = {
@@ -19,6 +20,7 @@ const icons = {
   github,
   plus,
   minus,
+  list,
 };
 
 export function icon(name: keyof typeof icons): SVGSVGElement {

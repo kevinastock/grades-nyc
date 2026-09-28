@@ -22,6 +22,9 @@ export type MapProps = {
   restaurants: Map<string, Restaurant>;
   selectedId: string | null;
   cameraRequest: CameraRequest;
+  showResultsToggle: boolean;
+  resultsVisible: boolean;
+  onToggleResults: () => void;
   onCamera: (
     camera: MapCamera,
     bounds: { west: number; south: number; east: number; north: number },
@@ -50,15 +53,28 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
   fitButton.title = "Fit results";
   fitButton.dataset.variant = "secondary";
   fitButton.append(icon("maximize"));
+  const resultsToggle = document.createElement("button");
+  resultsToggle.type = "button";
+  resultsToggle.className = "icon map-results-toggle";
+  resultsToggle.dataset.variant = "secondary";
+  resultsToggle.setAttribute("aria-controls", "restaurant-results");
+  resultsToggle.append(icon("list"));
+  resultsToggle.addEventListener("click", () => props.onToggleResults());
   const message = document.createElement("div");
   message.className = "map-message";
   message.setAttribute("role", "alert");
   message.dataset.variant = "warning";
-  toolbar.append(fitButton);
+  toolbar.append(fitButton, resultsToggle);
   wrap.append(element, toolbar, message);
   host.replaceChildren(wrap);
 
   function renderStatus() {
+    resultsToggle.hidden = !props.showResultsToggle;
+    resultsToggle.title = props.resultsVisible
+      ? "Hide search results"
+      : "Show search results";
+    resultsToggle.setAttribute("aria-label", resultsToggle.title);
+    resultsToggle.setAttribute("aria-expanded", String(props.resultsVisible));
     const { result, selectedId, restaurants } = props;
     const selected = selectedId ? restaurants.get(selectedId) : null;
     const messages = tileError ? ["Map tiles unavailable."] : [];

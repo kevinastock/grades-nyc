@@ -38,7 +38,7 @@ const bundle = await build({
   ],
 });
 
-async function harness(t) {
+async function harness(t, overrides = {}) {
   const w = new Window({ url: "http://localhost/" });
   w.WebKitCSSMatrix = class {
     m11 = 1;
@@ -97,7 +97,7 @@ async function harness(t) {
   const errors = [];
   const host = w.document.createElement("main");
   w.document.body.append(host);
-  const view = createRestaurantMap(host, {
+  const props = {
     explorer: {
       viewport(revision, bounds, zoom) {
         return new Promise((resolve) =>
@@ -108,6 +108,9 @@ async function harness(t) {
     result: { revision: 1, mapped: rows.length, unmapped: 0 },
     restaurants,
     selectedId: null,
+    showResultsToggle: true,
+    resultsVisible: false,
+    onToggleResults() {},
     cameraRequest: {
       key: "search",
       view: { lat: 40.74, lon: -73.97, zoom: 14 },
@@ -120,7 +123,9 @@ async function harness(t) {
     onError(error) {
       errors.push(error);
     },
-  });
+    ...overrides,
+  };
+  const view = createRestaurantMap(host, props);
   t.after(async () => {
     view.destroy();
     await w.happyDOM.close();
@@ -188,6 +193,9 @@ async function harness(t) {
   await frame();
   assert.equal(requests.length, 1);
   return {
+    host,
+    view,
+    props,
     map,
     requests,
     accepted,
@@ -199,6 +207,28 @@ async function harness(t) {
     assertPositions,
   };
 }
+
+test("the results control exposes its state and updates without resetting the map", async (t) => {
+  let toggles = 0;
+  const h = await harness(t, { onToggleResults: () => toggles++ });
+  const toggle = h.host.querySelector('[aria-controls="restaurant-results"]');
+  assert.equal(toggle.hidden, false);
+  assert.equal(toggle.getAttribute("aria-label"), "Show search results");
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.ok(toggle.querySelector("svg.feather-list"));
+  toggle.click();
+  assert.equal(toggles, 1);
+  const canvas = h.map.getContainer();
+  const center = h.map.getCenter();
+  h.view.update({ ...h.props, resultsVisible: true });
+  assert.equal(toggle.getAttribute("aria-label"), "Hide search results");
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  assert.equal(h.map.getContainer(), canvas);
+  assert.ok(h.map.getCenter().equals(center));
+  assert.equal(h.requests.length, 1);
+  h.view.update({ ...h.props, showResultsToggle: false });
+  assert.equal(toggle.hidden, true);
+});
 
 test("viewport responses from before the next zoom cannot clear the displayed restaurants", async (t) => {
   const h = await harness(t);

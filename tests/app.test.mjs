@@ -96,8 +96,26 @@ function dataset(count = 90) {
   };
 }
 
-async function mount(t, hash = "#/search", selected = []) {
-  const window = new Window({ url: `http://localhost/${hash}` });
+async function mount(t, hash = "#/search", selected = [], size = {}) {
+  const window = new Window({ url: `http://localhost/${hash}`, ...size });
+  // Happy DOM treats comma-separated media queries as AND and misses the first
+  // true-to-false change. Keep its real query evaluation, with browser OR/change
+  // semantics so portrait, landscape and live resizing exercise the app.
+  const matchMedia = window.matchMedia.bind(window);
+  window.matchMedia = (query) => {
+    const branches = query.split(",").map((part) => matchMedia(part.trim()));
+    const media = new window.EventTarget();
+    Object.defineProperty(media, "matches", {
+      get: () => branches.some((branch) => branch.matches),
+    });
+    let previous = media.matches;
+    window.addEventListener("resize", () => {
+      if (previous === media.matches) return;
+      previous = media.matches;
+      media.dispatchEvent(new window.Event("change"));
+    });
+    return media;
+  };
   window.localStorage.setItem(
     "nyc-grades-watchlist-v1",
     JSON.stringify({ selected }),
@@ -139,6 +157,11 @@ async function mount(t, hash = "#/search", selected = []) {
     },
     createMap(host, props) {
       const node = window.document.createElement("div");
+      const toggle = window.document.createElement("button");
+      toggle.className = "map-results-toggle";
+      toggle.setAttribute("aria-controls", "restaurant-results");
+      toggle.onclick = () => map.props.onToggleResults();
+      node.append(toggle);
       host.replaceChildren(node);
       const map = {
         props,
@@ -156,6 +179,7 @@ async function mount(t, hash = "#/search", selected = []) {
           node.remove();
         },
       };
+      toggle.setAttribute("aria-label", "Show search results");
       maps.push(map);
       return map;
     },
@@ -272,6 +296,139 @@ test("SVG controls keep accessible names and the GitHub link opens the repositor
   clear.click();
   assert.equal(h.input().value, "");
   assert.equal(h.window.document.activeElement, h.input());
+});
+
+for (const [orientation, size] of [
+  ["portrait", { width: 390, height: 844 }],
+  ["landscape", { width: 932, height: 430 }],
+]) {
+  test(`mobile ${orientation} starts with the map and toggles results without resetting it`, async (t) => {
+    const h = await mount(t, "#/search", [], size);
+    await h.boot();
+    const map = h.map();
+    const historyLength = h.window.history.length;
+    const queryCount = h.clients[0].jobs.length;
+    assert.equal(h.results().hidden, true);
+    assert.equal(h.results().id, "restaurant-results");
+    assert.equal(map.props.showResultsToggle, true);
+    assert.equal(map.props.resultsVisible, false);
+    assert.notEqual(h.window.document.activeElement, h.input());
+
+    map.props.onToggleResults();
+    assert.equal(h.results().hidden, false);
+    assert.equal(map.props.resultsVisible, true);
+    map.props.onToggleResults();
+    assert.equal(h.results().hidden, true);
+    assert.equal(map.props.resultsVisible, false);
+    assert.equal(h.map(), map);
+    assert.equal(h.maps.length, 1);
+    assert.equal(h.window.history.length, historyLength);
+    assert.equal(h.clients[0].jobs.length, queryCount);
+  });
+}
+
+test("mobile typing reveals results immediately, including an unchanged query, without stealing focus", async (t) => {
+  const h = await mount(t, "#/search", [], { width: 390, height: 844 });
+  await h.boot();
+  const query = h.search("pizza");
+  assert.equal(h.results().hidden, false);
+  assert.equal(h.results().getAttribute("aria-busy"), "true");
+  assert.equal(h.map().props.resultsVisible, true);
+  assert.equal(h.window.document.activeElement, h.input());
+  await h.resolveQuery(query, ["1", "2"]);
+  h.viewport();
+
+  h.map().props.onToggleResults();
+  assert.equal(h.results().hidden, true);
+  const queryCount = h.clients[0].jobs.length;
+  h.search("pizza");
+  assert.equal(h.results().hidden, false);
+  assert.equal(h.map().props.resultsVisible, true);
+  assert.equal(h.clients[0].jobs.length, queryCount);
+  assert.equal(h.window.document.activeElement, h.input());
+
+  h.root.querySelector('[data-restaurant-id="1"]').click();
+  const next = h.search("bagel");
+  assert.equal(h.root.querySelector(".detail-pane").hidden, true);
+  assert.equal(h.results().hidden, false);
+  assert.equal(h.window.document.activeElement, h.input());
+  await h.resolveQuery(next, ["2"]);
+  h.viewport();
+  assert.equal(h.window.document.activeElement, h.input());
+});
+
+test("a mobile search URL exposes its query results on arrival", async (t) => {
+  const h = await mount(t, "#/search?q=pizza", [], {
+    width: 390,
+    height: 844,
+  });
+  await h.boot();
+  assert.equal(h.input().value, "pizza");
+  assert.equal(h.results().hidden, false);
+  assert.equal(h.map().props.resultsVisible, true);
+});
+
+test("mobile map selection and Close preserve collapsed results and restore usable focus", async (t) => {
+  const h = await mount(t, "#/search", [], { width: 390, height: 844 });
+  await h.boot();
+  h.map().props.onSelect("1");
+  assert.equal(h.root.querySelector(".detail-pane").hidden, false);
+  assert.equal(h.results().hidden, true);
+  h.root.querySelector('[aria-label="Close restaurant details"]').click();
+  await h.flush();
+  h.viewport();
+  assert.equal(h.root.querySelector(".detail-pane").hidden, true);
+  assert.equal(h.results().hidden, true);
+  assert.equal(h.map().props.resultsVisible, false);
+  assert.equal(
+    h.window.document.activeElement,
+    h.root.querySelector(".map-results-toggle"),
+  );
+
+  h.map().props.onSelect("2");
+  h.map().props.onToggleResults();
+  await h.flush();
+  h.viewport();
+  assert.equal(h.root.querySelector(".detail-pane").hidden, true);
+  assert.equal(h.results().hidden, false);
+  assert.equal(h.map().props.resultsVisible, true);
+});
+
+test("mobile Back restores expanded results, list position and selected-card focus", async (t) => {
+  const h = await mount(t, "#/search", [], { width: 390, height: 844 });
+  await h.boot();
+  h.map().props.onToggleResults();
+  h.results().scrollTop = 137;
+  h.root.querySelector('[data-restaurant-id="5"]').click();
+  assert.equal(h.results().hidden, true);
+  h.window.history.back();
+  await h.flush();
+  h.viewport();
+  assert.equal(h.results().hidden, false);
+  assert.equal(h.map().props.resultsVisible, true);
+  assert.equal(h.results().scrollTop, 137);
+  assert.equal(h.window.document.activeElement.dataset.restaurantId, "5");
+});
+
+test("resizing shows desktop results while retaining the mobile visibility preference", async (t) => {
+  const h = await mount(t, "#/search", [], { width: 390, height: 844 });
+  await h.boot();
+  const map = h.map();
+  h.window.happyDOM.setWindowSize({ width: 1440, height: 900 });
+  assert.equal(h.results().hidden, false);
+  assert.equal(map.props.showResultsToggle, false);
+  assert.equal(map.props.resultsVisible, true);
+  h.window.happyDOM.setWindowSize({ width: 932, height: 430 });
+  assert.equal(h.results().hidden, true);
+  assert.equal(map.props.showResultsToggle, true);
+  assert.equal(map.props.resultsVisible, false);
+  map.props.onToggleResults();
+  h.window.happyDOM.setWindowSize({ width: 1440, height: 900 });
+  h.window.happyDOM.setWindowSize({ width: 390, height: 844 });
+  assert.equal(h.results().hidden, false);
+  assert.equal(map.props.resultsVisible, true);
+  assert.equal(h.map(), map);
+  assert.equal(h.maps.length, 1);
 });
 
 test("latest search wins over older responses and errors", async (t) => {

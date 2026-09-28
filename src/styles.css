@@ -311,7 +311,7 @@ button.violation-code {
     display: none;
   }
 }
-@media (max-width: 850px) {
+@media (max-width: 850px), (max-width: 1000px) and (orientation: landscape) {
   .site-header {
     gap: var(--space-1);
     padding: var(--space-2);
@@ -336,10 +336,13 @@ button.violation-code {
     flex-basis: 100%;
   }
 }
-@media (max-width: 700px), (max-width: 850px) and (orientation: portrait) {
+@media (max-width: 850px), (max-width: 1000px) and (orientation: landscape) {
   .workspace,
   .workspace.has-selection {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+  .workspace.results-visible {
     grid-template-rows: clamp(150px, 28dvh, 240px) minmax(0, 1fr);
   }
   .explore-map {
@@ -348,6 +351,24 @@ button.violation-code {
   .results-list,
   .detail-pane {
     grid-row: 2;
+  }
+  .app.has-detail {
+    height: auto;
+    min-height: 100dvh;
+    overflow: visible;
+  }
+  .app.has-detail .app-main,
+  .app.has-detail .search-page {
+    flex: none;
+    overflow: visible;
+  }
+  .workspace.has-selection {
+    flex: none;
+    grid-template-rows: clamp(150px, 28dvh, 240px) auto;
+  }
+  .app.has-detail .detail-scroll {
+    flex: none;
+    overflow: visible;
   }
 }
 @media (max-width: 400px) {
@@ -374,20 +395,4 @@ button.violation-code {
   flex-shrink: 0;
   padding: 0;
   font-size: 1.25rem;
-}
-@media (min-width: 600px) and (max-width: 1000px) and (orientation: landscape) {
-  .workspace,
-  .workspace.has-selection {
-    grid-template-columns: minmax(270px, 45%) minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr);
-  }
-  .explore-map {
-    grid-column: 2;
-    grid-row: 1;
-  }
-  .results-list,
-  .detail-pane {
-    grid-column: 1;
-    grid-row: 1;
-  }
 }
