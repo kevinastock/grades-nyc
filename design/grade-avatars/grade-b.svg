@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100" role="img" aria-labelledby="grade-b-title" aria-describedby="grade-b-desc">
+  <title id="grade-b-title">Grade B</title>
+  <desc id="grade-b-desc">A large letter B on a pale circular field. Independent NYC Grades artwork; no city seal.</desc>
+  <circle cx="50" cy="50" r="49" fill="#F2F5EE" stroke="#BFCEBA" stroke-width="2"/>
+  <g fill="#237D43">
+    <path transform="translate(50 50) scale(0.15) translate(-227.75 -237.55)" d="M96.6,443.5h150.8c78.4,0,131-43.7,131-112.5c0-50.3-29.3-89.1-79.6-96.9v-1.2c40.7-4.8,72.4-40.7,72.4-96.9 c0-62.2-50.3-106.5-129.2-106.5H100.8L96.6,443.5z M174.4,384.9l1.8-120.9h42.5c56.2,0,83.2,21.5,83.2,63.4 c0,35.3-25.7,58-75.4,57.4h-52.1V384.9z M176.8,205.4l0.6-117.3h48.5c45.5,0,72.4,19.7,72.4,57.4c0,41.9-36.5,59.8-76.6,59.8 L176.8,205.4L176.8,205.4z"/>
+  </g>
+</svg>

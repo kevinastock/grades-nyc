@@ -1,0 +1,19 @@
+node_modules
+dist/
+public/data/
+*.tsbuildinfo
+.DS_Store
+.env.local
+data/
+.cache/
+# Downloaded datasets and reference documents never belong in source control.
+*.[cC][sS][vV]
+*.[tT][sS][vV]
+*.[pP][aA][rR][qQ][uU][eE][tT]
+*.[xX][lL][sS]
+*.[xX][lL][sS][xX]
+*.[dD][oO][cC]
+*.[dD][oO][cC][xX]
+*.[pP][dD][fF]
+*.duckdb
+*.duckdb.wal

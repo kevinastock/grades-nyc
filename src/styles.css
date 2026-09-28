@@ -1,0 +1,386 @@
+/* Oat owns component appearance. These rules size the persistent map/workspace. */
+[hidden] {
+  display: none !important;
+}
+.app {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.site-header {
+  flex-shrink: 0;
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+.site-header > a:first-child {
+  font-weight: 700;
+}
+.header-meta {
+  margin-left: auto;
+  flex-wrap: nowrap;
+}
+.data-source {
+  font-size: var(--text-7);
+}
+.restaurant-nav > svg {
+  display: none;
+}
+svg.feather {
+  width: 1em;
+  height: 1em;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+.app-main,
+.search-page {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: var(--space-3);
+}
+.app-main {
+  padding: var(--space-3);
+  overflow: hidden;
+}
+.search-toolbar {
+  flex-shrink: 0;
+}
+.search-row {
+  flex-wrap: nowrap;
+}
+.filter-actions {
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+}
+.filter-reset {
+  flex-shrink: 0;
+  padding-inline: var(--space-2);
+}
+.filter-actions:has(> button:only-child[hidden]) {
+  display: none;
+}
+.search-row fieldset {
+  flex: 1;
+  min-width: 0;
+}
+.search-row fieldset > input {
+  min-width: 0;
+}
+/* This search field has its own accessible clear button. */
+.search-row input[type="search"]::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+  display: none;
+}
+/* Oat's group styling counts hidden controls when choosing the last child. */
+.search-row fieldset:has(> button[hidden]) > input {
+  border-radius: var(--radius-medium);
+}
+.search-row fieldset:has(> button[hidden]) > input:not(:focus) {
+  border-inline-end-color: var(--input);
+}
+.filter-bar .choice-dropdown {
+  flex: 1;
+  min-width: 140px;
+  max-width: 260px;
+}
+.workspace {
+  --results-width: 360px;
+  display: grid;
+  grid-template-columns: var(--results-width) minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+  gap: var(--space-3);
+}
+.workspace.has-selection {
+  grid-template-columns: var(--results-width) minmax(350px, 450px) minmax(
+      0,
+      1fr
+    );
+}
+.results-list,
+.detail-scroll,
+.preferences-main {
+  overflow: auto;
+  min-height: 0;
+  overscroll-behavior: contain;
+}
+.results-list > * {
+  flex-shrink: 0;
+}
+.restaurant-card {
+  display: grid;
+  grid-template-columns: 2.5rem minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: start;
+  padding: var(--space-3);
+  overflow-wrap: anywhere;
+}
+.restaurant-card[aria-current] {
+  border-color: var(--primary);
+}
+.restaurant-meta {
+  font-size: var(--text-7);
+}
+.detail-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-medium);
+}
+.detail-scroll {
+  padding: var(--space-3);
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+.explore-map {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.preferences-main {
+  flex: 1;
+}
+.preferences {
+  max-width: 1100px;
+  margin-inline: auto;
+}
+.grade-avatar {
+  flex-shrink: 0;
+  background: transparent;
+}
+.grade-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.grade-avatar-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.restaurant-card > .grade-avatar-wrap,
+.detail-grade-link {
+  align-self: center;
+}
+.grade-watch-count {
+  position: absolute;
+  right: -0.35rem;
+  bottom: -0.2rem;
+  min-width: 1.125rem;
+  height: 1.125rem;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--background);
+  background-color: light-dark(
+    color-mix(in srgb, var(--warning) 10%, var(--card)),
+    color-mix(in srgb, var(--warning) 30%, var(--card))
+  );
+  opacity: 1;
+}
+.restaurant-card-text,
+.detail-identity-text {
+  min-width: 0;
+}
+.detail-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+.detail-identity h2 {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+}
+.detail-title {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+.detail-actions {
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+}
+.detail-identity p {
+  margin: 0;
+}
+.detail-identity-text {
+  flex: 1;
+}
+.icon {
+  min-height: 2rem;
+  font-size: 1.25rem;
+}
+.inspection-list summary {
+  padding: var(--space-3);
+}
+.inspection-list .inspection-findings {
+  margin: var(--space-2);
+}
+/* Watchlist updates must not replay the accordion's entrance animation. */
+.inspection-list details[open] > .inspection-findings {
+  animation: none;
+}
+.inspection-findings > p {
+  margin-bottom: var(--space-2);
+}
+.findings {
+  margin: 0;
+}
+.violation-row {
+  padding: var(--space-2);
+}
+button.violation-code {
+  border: 0;
+}
+.toast {
+  min-width: min(20rem, calc(100vw - 2rem));
+  max-width: calc(100vw - 2rem);
+  line-height: var(--leading-normal);
+}
+.choice-dropdown {
+  display: block;
+  min-width: 0;
+}
+.choice-dropdown > button {
+  width: 100%;
+  justify-content: space-between;
+}
+.dropdown-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.choice-menu {
+  max-height: min(24rem, var(--menu-room, 65dvh));
+  max-width: calc(100vw - 1rem);
+  overflow: auto;
+  padding: var(--space-1);
+}
+.choice-menu [role="menuitem"] {
+  white-space: normal;
+  text-align: left;
+}
+.choice-check {
+  width: 1em;
+  flex-shrink: 0;
+}
+.preferences-toolbar {
+  margin-bottom: var(--space-2);
+}
+.preferences-toolbar > input {
+  flex: 1;
+  min-width: 180px;
+}
+.preferences-toolbar > .choice-dropdown {
+  min-width: 136px;
+}
+.preferences-toolbar > label {
+  flex-shrink: 0;
+}
+.preferences-meta {
+  font-size: var(--text-7);
+  margin-bottom: var(--space-2);
+}
+.violation-option {
+  padding: var(--space-3);
+  align-items: flex-start;
+}
+.violation-option > input {
+  flex-shrink: 0;
+  margin-top: var(--space-1);
+}
+.violation-option > span {
+  min-width: 0;
+}
+
+@media (max-width: 1359px) {
+  .workspace.has-selection {
+    grid-template-columns: minmax(320px, 440px) minmax(0, 1fr);
+  }
+  .has-selection .results-list {
+    display: none;
+  }
+}
+@media (max-width: 850px) {
+  .site-header {
+    gap: var(--space-1);
+    padding: var(--space-2);
+    flex-wrap: nowrap;
+  }
+  .site-header a {
+    padding-inline: var(--space-2);
+  }
+  .site-header nav {
+    flex-wrap: nowrap;
+    gap: 0;
+  }
+  .data-source {
+    font-size: var(--text-8);
+    line-height: 1.2;
+    text-align: right;
+  }
+  .filter-bar .choice-dropdown {
+    max-width: none;
+  }
+  .preferences-toolbar > input {
+    flex-basis: 100%;
+  }
+}
+@media (max-width: 700px), (max-width: 850px) and (orientation: portrait) {
+  .workspace,
+  .workspace.has-selection {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: clamp(150px, 28dvh, 240px) minmax(0, 1fr);
+  }
+  .explore-map {
+    grid-row: 1;
+  }
+  .results-list,
+  .detail-pane {
+    grid-row: 2;
+  }
+}
+@media (max-width: 400px) {
+  .site-header .button {
+    font-size: var(--text-8);
+    padding-inline: var(--space-1);
+  }
+}
+@media (max-width: 480px) {
+  .site-header .restaurant-nav {
+    width: 2rem;
+    min-height: 2rem;
+    padding: 0;
+    font-size: 1.25rem;
+  }
+  .restaurant-nav > svg {
+    display: block;
+  }
+  .restaurant-nav > span {
+    display: none;
+  }
+}
+.site-header .icon {
+  flex-shrink: 0;
+  padding: 0;
+  font-size: 1.25rem;
+}
+@media (min-width: 600px) and (max-width: 1000px) and (orientation: landscape) {
+  .workspace,
+  .workspace.has-selection {
+    grid-template-columns: minmax(270px, 45%) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+  .explore-map {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .results-list,
+  .detail-pane {
+    grid-column: 1;
+    grid-row: 1;
+  }
+}

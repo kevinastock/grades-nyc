@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100" role="img" aria-labelledby="grade-pending-title" aria-describedby="grade-pending-desc">
+  <title id="grade-pending-title">Grade pending</title>
+  <desc id="grade-pending-desc">The letters G and P on a pale circular field. Independent NYC Grades artwork; no city seal.</desc>
+  <circle cx="50" cy="50" r="49" fill="#F3F1ED" stroke="#CFC9C1" stroke-width="2"/>
+  <g fill="#393431">
+    <g transform="translate(15.9008 30.0704) scale(0.48)"><path transform="translate(-55.56 -127.74)" d="M111.84,197.82A31.63,31.63,0,0,1,100.08,200c-17.16,0-28.44-12.6-28.44-30.72,0-19.32,14.52-30.72,28.44-30.72a47,47,0,0,1,21.24,5.16L127,132.18c-7-3.84-16.2-6.12-26.88-6.12-24.72,0-44.52,19-44.52,43.2,0,25.2,19.32,43.2,44.52,43.2,9.12,0,18.72-2.4,27.84-6l.6-37.8H112.44Z"/><path transform="translate(87.47999999999999 -235.74)" d="M0,318.78H15.72l.12-32.52h8.52c16.08,0,30.24-8.16,30.24-25.2,0-15.48-8.64-25.32-30.36-25.32H.84Zm16.08-45,.24-25.56h8.16c11.16,0,14,7.68,14,12.72,0,7.8-6.36,12.84-14.64,12.84Z"/></g>
+  </g>
+</svg>

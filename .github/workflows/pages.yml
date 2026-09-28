@@ -1,0 +1,76 @@
+name: Build and deploy NYC Inspection Grades
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # 02:17 EST / 03:17 EDT. Avoid the busy start of the hour.
+    - cron: "17 7 * * *"
+
+permissions:
+  contents: read
+
+# Serialize the whole pipeline so a slower old build cannot deploy last.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Keep datasets and document downloads out of Git
+        run: |
+          if git ls-files | grep -Ei '(^(\.cache|data|public/data|dist)/|\.(csv|tsv|parquet|xlsx?|docx?|pdf|duckdb)(\.wal)?$)'; then
+            echo '::error::Remove generated datasets and downloaded documents from source control.'
+            exit 1
+          fi
+      - name: Install DuckDB CLI
+        env:
+          DUCKDB_VERSION: "1.5.5"
+        run: |
+          curl --fail --location --retry 3 --connect-timeout 30 --max-time 180 \
+            "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/duckdb_cli-linux-amd64.zip" \
+            --output "$RUNNER_TEMP/duckdb.zip"
+          mkdir -p "$RUNNER_TEMP/duckdb-bin"
+          unzip -q "$RUNNER_TEMP/duckdb.zip" -d "$RUNNER_TEMP/duckdb-bin"
+          chmod +x "$RUNNER_TEMP/duckdb-bin/duckdb"
+          echo "$RUNNER_TEMP/duckdb-bin" >> "$GITHUB_PATH"
+      - name: Install dependencies
+        run: npm ci
+      - name: Test CSV transformations and application
+        run: npm test
+      # Only npm packages are cached. Every runner downloads a fresh NYC CSV.
+      - name: Download, validate, and build the complete site
+        run: npm run build
+      - name: Upload site
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/upload-pages-artifact@v5.0.0
+        with:
+          path: dist
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@v6.0.0
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5.0.1

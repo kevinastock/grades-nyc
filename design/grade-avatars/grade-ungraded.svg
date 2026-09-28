@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100" role="img" aria-labelledby="grade-ungraded-title" aria-describedby="grade-ungraded-desc">
+  <title id="grade-ungraded-title">No recorded grade</title>
+  <desc id="grade-ungraded-desc">The letters N and G on a pale circular field. Independent NYC Grades artwork; no city seal.</desc>
+  <circle cx="50" cy="50" r="49" fill="#F5F0F7" stroke="#CFBEDA" stroke-width="2"/>
+  <g fill="#684087">
+    <g transform="translate(12.7424 30.0704) scale(0.48)"><path transform="translate(-324.32 -235.74)" d="M324.32,318.78h15.36l-1.2-61.32.24-.24,37.8,63.24L392,316.14l.72-80.4H377.4l1,61.92h-.24l-38.76-63.6-14.28,4.32Z M462.79,305.78A31.63,31.63,0,0,1,451.07,308c-17.16,0-28.44-12.6-28.44-30.72,0-19.32,14.52-30.72,28.44-30.72a47,47,0,0,1,21.24,5.16L478,240.18c-7-3.84-16.2-6.12-26.88-6.12-24.72,0-44.52,19-44.52,43.2,0,25.2,19.32,43.2,44.52,43.2,9.12,0,18.72-2.4,27.84-6l.6-37.8H463.43Z"/></g>
+  </g>
+</svg>

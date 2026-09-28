@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100" role="img" aria-labelledby="grade-a-title" aria-describedby="grade-a-desc">
+  <title id="grade-a-title">Grade A</title>
+  <desc id="grade-a-desc">A large letter A on a pale circular field. Independent NYC Grades artwork; no city seal.</desc>
+  <circle cx="50" cy="50" r="49" fill="#F2F5F7" stroke="#B9CBDA" stroke-width="2"/>
+  <g fill="#155E9B">
+    <path transform="translate(50 50) scale(0.15) translate(-227.45 -237.5)" d="M155.6,325.8h142.7L338.5,443h81.7L266.3,25h-69.8l-166,418h78.9L155.6,325.8z M277.6,264.2h-100L229,104.4 h1.2L277.6,264.2z"/>
+  </g>
+</svg>

@@ -1,0 +1,77 @@
+{
+  "viewBox": "0 0 100 100",
+  "approach": "source composition and shared typographic guides",
+  "single_letters": {
+    "A": {
+      "source": "NYCRestaurant_A.svg",
+      "source_canvas_center": [
+        227.45,
+        237.5
+      ],
+      "uniform_scale": 0.15,
+      "target_canvas_center": [
+        50,
+        50
+      ],
+      "transform": "translate(50 50) scale(0.15) translate(-227.45 -237.5)"
+    },
+    "B": {
+      "source": "NYCRestaurant_B.svg",
+      "source_canvas_center": [
+        227.75,
+        237.55
+      ],
+      "uniform_scale": 0.15,
+      "target_canvas_center": [
+        50,
+        50
+      ],
+      "transform": "translate(50 50) scale(0.15) translate(-227.75 -237.55)"
+    },
+    "C": {
+      "source": "NYCRestaurant_C.svg",
+      "source_canvas_center": [
+        227.8,
+        237.5
+      ],
+      "uniform_scale": 0.15,
+      "target_canvas_center": [
+        50,
+        50
+      ],
+      "transform": "translate(50 50) scale(0.15) translate(-227.8 -237.5)"
+    }
+  },
+  "pairs": {
+    "uniform_scale": 0.48,
+    "source_cap_height": 83.04,
+    "capline": 30.0704,
+    "baseline": 69.9296,
+    "GP": {
+      "source": "NYCRestaurant_GP.svg",
+      "letters": "G from GRADE, P from PENDING",
+      "source_caplines": [
+        127.74,
+        235.74
+      ],
+      "source_baselines": [
+        210.78,
+        318.78
+      ],
+      "native_G_to_stem_gap": 14.48
+    },
+    "NG": {
+      "source": "NYCRestaurant_GP.svg",
+      "letters": "original adjacent NG from PENDING",
+      "source_capline": 235.74,
+      "source_baseline": 318.78,
+      "source_bounds": [
+        324.32,
+        234.06,
+        479.56,
+        320.46
+      ],
+      "native_gap": 13.88
+    }
+  }
+}
