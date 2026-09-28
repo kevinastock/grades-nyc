@@ -626,11 +626,6 @@ export function createApp(root: HTMLElement) {
     return {
       explorer: explorer!,
       result: queryResult!,
-      visibleMapped:
-        viewport?.revision === queryResult!.revision
-          ? viewport.visibleMapped
-          : queryResult!.mapped,
-      pending: searchPending,
       restaurants: lookup,
       selectedId: route.id,
       cameraRequest,

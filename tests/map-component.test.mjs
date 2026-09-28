@@ -106,8 +106,6 @@ async function harness(t) {
       },
     },
     result: { revision: 1, mapped: rows.length, unmapped: 0 },
-    visibleMapped: rows.length,
-    pending: false,
     restaurants,
     selectedId: null,
     cameraRequest: {

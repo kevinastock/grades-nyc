@@ -19,8 +19,6 @@ export type CameraRequest = { key: string; view: MapCamera | null };
 export type MapProps = {
   explorer: ExplorerClient;
   result: QueryResult;
-  visibleMapped: number;
-  pending: boolean;
   restaurants: Map<string, Restaurant>;
   selectedId: string | null;
   cameraRequest: CameraRequest;
@@ -52,27 +50,16 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
   fitButton.title = "Fit results";
   fitButton.dataset.variant = "secondary";
   fitButton.append(icon("maximize"));
-  const counter = document.createElement("span");
-  counter.className = "badge";
-  counter.dataset.variant = "secondary";
-  counter.dataset.spinner = "small";
-  counter.setAttribute("aria-live", "polite");
   const message = document.createElement("div");
   message.className = "map-message";
   message.setAttribute("role", "alert");
   message.dataset.variant = "warning";
-  toolbar.append(fitButton, counter);
+  toolbar.append(fitButton);
   wrap.append(element, toolbar, message);
   host.replaceChildren(wrap);
 
   function renderStatus() {
-    const { result, visibleMapped, pending, selectedId, restaurants } = props;
-    counter.textContent = `${visibleMapped.toLocaleString()} mapped${
-      result.unmapped > 0
-        ? ` · ${result.unmapped.toLocaleString()} without location`
-        : ""
-    }`;
-    counter.setAttribute("aria-busy", String(pending));
+    const { result, selectedId, restaurants } = props;
     const selected = selectedId ? restaurants.get(selectedId) : null;
     const messages = tileError ? ["Map tiles unavailable."] : [];
     if (selected && !hasCoordinates(selected))
