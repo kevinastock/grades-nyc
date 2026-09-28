@@ -4,7 +4,7 @@ public/data/
 *.tsbuildinfo
 .DS_Store
 .env.local
-data/
+/data/
 .cache/
 # Downloaded datasets and reference documents never belong in source control.
 *.[cC][sS][vV]
