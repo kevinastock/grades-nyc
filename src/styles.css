@@ -296,6 +296,13 @@ button.violation-code {
   min-width: 0;
 }
 
+/* Keep search text large enough to prevent iOS Safari's focus zoom. */
+@media (max-width: 850px), (any-pointer: coarse) {
+  input[type="search"] {
+    font-size: max(16px, 1rem);
+  }
+}
+
 @media (max-width: 1359px) {
   .workspace.has-selection {
     grid-template-columns: minmax(320px, 440px) minmax(0, 1fr);
