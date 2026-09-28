@@ -3,11 +3,12 @@ import rotateCcw from "./icons/feather/rotate-ccw.svg?raw";
 import search from "./icons/feather/search.svg?raw";
 import chevronDown from "./icons/feather/chevron-down.svg?raw";
 import check from "./icons/feather/check.svg?raw";
-import maximize from "./icons/feather/maximize.svg?raw";
 import github from "./icons/feather/github.svg?raw";
 import plus from "./icons/feather/plus.svg?raw";
 import minus from "./icons/feather/minus.svg?raw";
 import list from "./icons/feather/list.svg?raw";
+import menu from "./icons/feather/menu.svg?raw";
+import filter from "./icons/feather/filter.svg?raw";
 
 // Explicit imports keep the shipped set small; no Feather runtime is needed.
 const icons = {
@@ -16,11 +17,12 @@ const icons = {
   search,
   "chevron-down": chevronDown,
   check,
-  maximize,
   github,
   plus,
   minus,
   list,
+  menu,
+  filter,
 };
 
 export function icon(name: keyof typeof icons): SVGSVGElement {

@@ -103,11 +103,34 @@ export function createApp(root: HTMLElement) {
   }
   const home = navLink("NYC Inspection Grades", "search");
   const searchLink = navLink("Restaurants", "search");
-  searchLink.classList.add("restaurant-nav");
   searchLink.setAttribute("aria-label", "Restaurants");
   searchLink.title = "Restaurants";
-  searchLink.replaceChildren(icon("search"), el("span", {}, "Restaurants"));
-  const watchLink = navLink("Watchlist", "watchlist");
+  const violationsLabel = () =>
+    `Violations${selected.length ? ` (${selected.length})` : ""}`;
+  const watchLink = navLink(violationsLabel(), "watchlist");
+  const navigationLinks = el(
+    "div",
+    { class: "hstack gap-2" },
+    searchLink,
+    watchLink,
+  );
+  const navigationChoices = (): [string, string][] => [
+    ["search", "Restaurants"],
+    ["watchlist", violationsLabel()],
+  ];
+  const navigationMenu = createDropdown({
+    label: "Main navigation menu",
+    choices: navigationChoices(),
+    value: route.view,
+    onChange: (view) => {
+      rememberList();
+      navigation.navigate(view === "watchlist" ? "watchlist" : "search");
+    },
+  });
+  navigationMenu.element.classList.add("navigation-dropdown");
+  navigationMenu.trigger.className = "ghost icon small";
+  navigationMenu.trigger.removeAttribute("aria-describedby");
+  navigationMenu.trigger.replaceChildren(icon("menu"));
   const source = el("a", {
     class: "data-source text-light",
     href: "https://data.cityofnewyork.us/Health/DOHMH-New-York-City-Restaurant-Inspection-Results/43nn-pn8j",
@@ -134,8 +157,8 @@ export function createApp(root: HTMLElement) {
     el(
       "nav",
       { class: "hstack gap-2", "aria-label": "Main navigation" },
-      searchLink,
-      watchLink,
+      navigationLinks,
+      navigationMenu.element,
     ),
     el("div", { class: "header-meta hstack gap-2" }, source, github),
   );
@@ -165,18 +188,25 @@ export function createApp(root: HTMLElement) {
     },
     icon("x"),
   );
+  const filterCount = el("span", {
+    class: "filter-count",
+    "aria-hidden": true,
+  });
   const filtersToggle = el(
     "button",
     {
       type: "button",
-      class: "outline",
+      class: "outline icon filter-toggle",
+      "aria-label": "Filters",
+      title: "Filters",
       "aria-controls": "restaurant-filters",
       onclick: () => {
         filters.hidden = !filters.hidden;
         filtersToggle.setAttribute("aria-expanded", String(!filters.hidden));
       },
     },
-    "Filters",
+    icon("filter"),
+    filterCount,
   );
   function select(
     label: string,
@@ -610,7 +640,11 @@ export function createApp(root: HTMLElement) {
     searchLink.classList.toggle("ghost", !searching);
     watchLink.classList.toggle("ghost", searching);
     (searching ? searchLink : watchLink).setAttribute("aria-current", "page");
-    watchLink.textContent = `Watchlist${selected.length ? ` (${selected.length})` : ""}`;
+    navigationMenu.value = route.view;
+    if (watchLink.textContent !== violationsLabel()) {
+      watchLink.textContent = violationsLabel();
+      navigationMenu.setChoices(navigationChoices());
+    }
     if (searchInput.value !== route.search.query)
       searchInput.value = route.search.query;
     clearSearch.hidden = !route.search.query;
@@ -624,7 +658,11 @@ export function createApp(root: HTMLElement) {
     watch.disabled = !selected.length;
     const count = activeFilterCount();
     resetFilters.hidden = !count;
-    filtersToggle.textContent = `Filters${count ? ` (${count})` : ""}`;
+    filterCount.textContent = count ? String(count) : "";
+    filterCount.hidden = !count;
+    const filtersLabel = `Filters${count ? ` (${count} active)` : ""}`;
+    filtersToggle.setAttribute("aria-label", filtersLabel);
+    filtersToggle.title = filtersLabel;
     workspace.hidden = !data;
     renderDetail();
     renderLayout();
@@ -813,6 +851,11 @@ export function createApp(root: HTMLElement) {
     renderRoute();
   });
   function resizeFilters() {
+    const menu =
+      navigationMenu.element.querySelector<HTMLElement>("[popover]")!;
+    if (menu.matches(":popover-open")) menu.hidePopover();
+    navigationLinks.hidden = mobile.matches;
+    navigationMenu.element.hidden = !mobile.matches;
     (mobile.matches ? filterActions : filters).append(resetFilters);
     filtersToggle.hidden = !mobile.matches;
     filters.hidden = mobile.matches;
@@ -863,7 +906,7 @@ export function createApp(root: HTMLElement) {
       explorer?.dispose();
       detail?.destroy();
       preferences?.destroy();
-      for (const dropdown of [borough, cuisine, grade, watch])
+      for (const dropdown of [navigationMenu, borough, cuisine, grade, watch])
         dropdown.destroy();
       root.replaceChildren();
     },

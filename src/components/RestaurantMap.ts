@@ -46,13 +46,6 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
   element.setAttribute("aria-label", "Map of matching restaurants");
   const toolbar = document.createElement("div");
   toolbar.className = "map-tools vstack gap-2";
-  const fitButton = document.createElement("button");
-  fitButton.type = "button";
-  fitButton.className = "icon";
-  fitButton.setAttribute("aria-label", "Fit results");
-  fitButton.title = "Fit results";
-  fitButton.dataset.variant = "secondary";
-  fitButton.append(icon("maximize"));
   const resultsToggle = document.createElement("button");
   resultsToggle.type = "button";
   resultsToggle.className = "icon map-results-toggle";
@@ -64,7 +57,7 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
   message.className = "map-message";
   message.setAttribute("role", "alert");
   message.dataset.variant = "warning";
-  toolbar.append(fitButton, resultsToggle);
+  toolbar.append(resultsToggle);
   wrap.append(element, toolbar, message);
   host.replaceChildren(wrap);
 
@@ -470,14 +463,10 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
           cameraFrame = requestAnimationFrame(applyCameraRequest);
         });
       },
-      refresh(shouldFit: boolean) {
+      refresh() {
         interaction++;
         map.closePopup();
         if (!initialized || !hasSize()) return;
-        if (shouldFit) {
-          fit();
-          constrainPan();
-        }
         schedule();
       },
     };
@@ -560,7 +549,6 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
   }
 
   let controls = mountMap();
-  fitButton.addEventListener("click", () => controls.refresh(true));
   renderStatus();
   return {
     update(next: MapProps) {
@@ -578,7 +566,7 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
         if (next.cameraRequest.key !== previous.cameraRequest.key)
           controls.navigate();
         if (next.selectedId !== previous.selectedId) controls.selection();
-        if (next.result !== previous.result) controls.refresh(false);
+        if (next.result !== previous.result) controls.refresh();
       }
       renderStatus();
     },

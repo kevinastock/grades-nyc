@@ -23,8 +23,8 @@
 .data-source {
   font-size: var(--text-7);
 }
-.restaurant-nav > svg {
-  display: none;
+.navigation-dropdown {
+  flex-shrink: 0;
 }
 svg.feather {
   width: 1em;
@@ -53,6 +53,24 @@ svg.feather {
 .filter-actions {
   flex-shrink: 0;
   flex-wrap: nowrap;
+}
+.filter-toggle {
+  position: relative;
+}
+.filter-count {
+  position: absolute;
+  top: -0.35rem;
+  right: -0.35rem;
+  display: grid;
+  place-items: center;
+  min-width: 1rem;
+  height: 1rem;
+  padding-inline: 0.2rem;
+  border-radius: 50%;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: var(--text-8);
+  line-height: 1;
 }
 .filter-reset {
   flex-shrink: 0;
@@ -375,20 +393,6 @@ button.violation-code {
   .site-header .button {
     font-size: var(--text-8);
     padding-inline: var(--space-1);
-  }
-}
-@media (max-width: 480px) {
-  .site-header .restaurant-nav {
-    width: 2rem;
-    min-height: 2rem;
-    padding: 0;
-    font-size: 1.25rem;
-  }
-  .restaurant-nav > svg {
-    display: block;
-  }
-  .restaurant-nav > span {
-    display: none;
   }
 }
 .site-header .icon {

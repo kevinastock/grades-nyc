@@ -282,7 +282,8 @@ test("SVG controls keep accessible names and the GitHub link opens the repositor
   assert.equal(github.target, "_blank");
   assert.equal(github.rel, "noopener noreferrer");
   const search = h.root.querySelector('nav [aria-label="Restaurants"]');
-  assert.ok(search.querySelector("svg"));
+  assert.equal(search.querySelector("svg"), null);
+  assert.equal(search.textContent, "Restaurants");
   assert.equal(search.getAttribute("href"), "#/search");
   const query = h.search("pizza");
   await h.resolveQuery(query, ["1"]);
@@ -659,10 +660,10 @@ test("one reset action clears active filters while preserving the query", async 
   assert.equal(job.criteria.search, "pizza");
   for (const key of ["borough", "cuisine", "grade", "watchFilter"])
     assert.equal(job.criteria[key], null);
-  assert.equal(
-    h.root.querySelector('[aria-controls="restaurant-filters"]').textContent,
-    "Filters",
-  );
+  const filters = h.root.querySelector('[aria-controls="restaurant-filters"]');
+  assert.equal(filters.textContent, "");
+  assert.equal(filters.getAttribute("aria-label"), "Filters");
+  assert.ok(filters.querySelector("svg.feather-filter"));
   await h.resolveQuery(job, []);
   h.viewport();
   assert.equal(

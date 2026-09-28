@@ -1,6 +1,6 @@
 # Feather icons
 
-These nine SVGs are copied unchanged from [Feather v4.29.2](https://github.com/feathericons/feather/tree/v4.29.2/icons): `x`, `rotate-ccw`, `search`, `chevron-down`, `check`, `maximize`, `github`, `plus`, and `minus`.
+These SVGs are copied unchanged from [Feather v4.29.2](https://github.com/feathericons/feather/tree/v4.29.2/icons): `x`, `rotate-ccw`, `search`, `chevron-down`, `check`, `github`, `plus`, `minus`, `list`, `menu`, and `filter`.
 
 Copyright 2013–2023 Cole Bemis. MIT license: [`public/licenses/feather.txt`](../../../public/licenses/feather.txt), also distributed with the built site.
 
