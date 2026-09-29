@@ -98,15 +98,20 @@ async function harness(
     }
   };
   const size = { width: hidden ? 0 : 884, height: hidden ? 0 : 550 };
+  let geometryReads = 0;
   Object.defineProperties(w.HTMLElement.prototype, {
     clientWidth: {
       get() {
-        return this.classList.contains("map") ? size.width : 0;
+        if (!this.classList.contains("map")) return 0;
+        geometryReads++;
+        return size.width;
       },
     },
     clientHeight: {
       get() {
-        return this.classList.contains("map") ? size.height : 0;
+        if (!this.classList.contains("map")) return 0;
+        geometryReads++;
+        return size.height;
       },
     },
   });
@@ -239,7 +244,10 @@ async function harness(
     size.width = width;
     size.height = height;
     for (const observer of observers)
-      if (!observer.disconnected) observer.callback([]);
+      if (!observer.disconnected)
+        observer.callback([
+          { target: observer.element, contentRect: { width, height } },
+        ]);
     await frame();
   }
   function setDark(value) {
@@ -275,6 +283,7 @@ async function harness(
     workerUrls,
     expansions,
     Popup,
+    geometryReads: () => geometryReads,
   };
 }
 
@@ -539,6 +548,34 @@ test("hidden mounts defer viewport requests until measurable and preserve the ca
   assert.equal(h.requests.length, 2);
   await h.reply(h.requests.at(-1), ["central", "nearby"]);
   h.assertAnchors();
+});
+
+test("camera constraints reuse the observed viewport without forcing layout", async (t) => {
+  const h = await harness(t);
+  const center = h.map.getCenter();
+  center.lng = -73.7;
+  const constrain = h.map.options.transformConstrain;
+  const before = h.geometryReads();
+  const narrow = constrain(center, 13);
+  for (let i = 0; i < 10; i++) constrain(center, 10 + i / 10);
+  assert.equal(
+    h.geometryReads(),
+    before,
+    "camera movement must not synchronously measure the DOM",
+  );
+  await h.resize(1400, 700);
+  const afterResize = h.geometryReads();
+  const wide = constrain(center, 13);
+  assert.equal(h.geometryReads(), afterResize);
+  assert.notEqual(
+    wide.center.lng,
+    narrow.center.lng,
+    "the constraint uses the resized viewport",
+  );
+  assert.equal(
+    h.map.getContainer().style.getPropertyValue("--map-popup-width"),
+    "1376px",
+  );
 });
 
 test("destroy disconnects observers, theme listeners and pending viewport work", async (t) => {

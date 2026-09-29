@@ -21,6 +21,7 @@ const stubs = {
     }
   `,
   "./components/RestaurantMap": `
+    globalThis.appTest.mapImports++;
     export const createRestaurantMap = (...args) => globalThis.appTest.createMap(...args);
   `,
 };
@@ -132,6 +133,7 @@ async function mount(t, hash = "#/search", selected = [], size = {}) {
   };
   window.cancelAnimationFrame = (id) => frames.delete(id);
   window.appTest = {
+    mapImports: 0,
     loadData(onProgress, restaurantId) {
       const job = { ...deferred(), onProgress, restaurantId };
       loads.push(job);
@@ -297,6 +299,45 @@ test("SVG controls keep accessible names and the GitHub link opens the repositor
   clear.click();
   assert.equal(h.input().value, "");
   assert.equal(h.window.document.activeElement, h.input());
+});
+
+test("watchlist startup defers the map renderer and basemap until search is opened", async (t) => {
+  const h = await mount(t, "#/watchlist");
+  h.loads[0].resolve(dataset());
+  await h.flush();
+  await h.resolveQuery(h.clients[0].jobs[0], ["1"]);
+  assert.equal(h.window.appTest.mapImports, 0);
+  assert.equal(h.maps.length, 0);
+  assert.equal(
+    h.window.document.head.querySelectorAll('link[rel="preload"]').length,
+    0,
+  );
+
+  h.root.querySelector('nav [aria-label="Restaurants"]').click();
+  await h.flush();
+  assert.equal(h.window.appTest.mapImports, 1);
+  assert.equal(h.maps.length, 1);
+  const hints = [
+    ...h.window.document.head.querySelectorAll('link[rel="preload"]'),
+  ];
+  assert.deepEqual(
+    hints.map((link) => link.href),
+    [
+      "https://tiles.openfreemap.org/styles/bright",
+      "https://tiles.openfreemap.org/planet",
+    ],
+  );
+  assert.ok(
+    hints.every(
+      (link) => link.as === "fetch" && link.crossOrigin === "anonymous",
+    ),
+  );
+  h.root.querySelector('nav [aria-label="Restaurants"]').click();
+  await h.flush();
+  assert.equal(
+    h.window.document.head.querySelectorAll('link[rel="preload"]').length,
+    2,
+  );
 });
 
 for (const [orientation, size] of [

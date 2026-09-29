@@ -22,6 +22,7 @@ import {
 } from "./components/shared";
 import { createDropdown } from "./components/Dropdown";
 import { el } from "./dom";
+import { preloadBasemap } from "./data/map-resources";
 
 const STORAGE_KEY = "nyc-grades-watchlist-v1";
 const REPOSITORY_URL = "https://github.com/kevinastock/grades-nyc";
@@ -132,12 +133,13 @@ export function createApp(root: HTMLElement) {
   navigationMenu.trigger.removeAttribute("aria-describedby");
   navigationMenu.trigger.replaceChildren(icon("menu"));
   const source = el("a", {
-    class: "data-source text-light",
+    class: "data-source text-light is-loading",
     href: "https://data.cityofnewyork.us/Health/DOHMH-New-York-City-Restaurant-Inspection-Results/43nn-pn8j",
     target: "_blank",
     rel: "noopener noreferrer",
-    hidden: true,
   });
+  const sourceAge = el("span", {}, "0 days ago");
+  source.append(el("span", {}, "Updated "), sourceAge);
   const github = el(
     "a",
     {
@@ -278,7 +280,7 @@ export function createApp(root: HTMLElement) {
     ),
     filters,
   );
-  const loading = el("div", { class: "p-4", role: "status" });
+  const loading = el("div", { class: "data-loading p-4", role: "status" });
   const searchWarning = el("div", {
     role: "alert",
     "data-variant": "error",
@@ -629,7 +631,8 @@ export function createApp(root: HTMLElement) {
   }
   function renderRoute() {
     const searching = route.view === "search";
-    if (!searching) {
+    if (searching) preloadMap();
+    else {
       map?.destroy();
       map = undefined;
     }
@@ -719,6 +722,8 @@ export function createApp(root: HTMLElement) {
     };
   }
   function preloadMap() {
+    if (disposed || route.view !== "search") return;
+    preloadBasemap();
     mapLoading ??= import("./components/RestaurantMap")
       .then((module) => {
         if (disposed) return;
@@ -731,14 +736,12 @@ export function createApp(root: HTMLElement) {
       });
   }
   function renderMap() {
-    if (
-      route.view !== "search" ||
-      !explorer ||
-      !queryResult ||
-      !mapModule ||
-      disposed
-    )
+    if (route.view !== "search" || !explorer || !queryResult || disposed)
       return;
+    if (!mapModule) {
+      preloadMap();
+      return;
+    }
     if (map) map.update(mapProps());
     else map = mapModule.createRestaurantMap(mapHost, mapProps());
   }
@@ -797,7 +800,6 @@ export function createApp(root: HTMLElement) {
     loading.setAttribute("role", "status");
     loading.removeAttribute("data-variant");
     loading.setAttribute("aria-busy", "true");
-    preloadMap();
     try {
       const value = await loadData((message) => {
         loading.textContent = message;
@@ -816,8 +818,8 @@ export function createApp(root: HTMLElement) {
           ["", input === borough ? "All boroughs" : "All cuisines"],
           ...options.map((name): [string, string] => [name, name]),
         ]);
-      source.hidden = false;
-      source.textContent = `Updated ${relativeDate(data.snapshot)}`;
+      sourceAge.textContent = relativeDate(data.snapshot);
+      source.classList.remove("is-loading");
       source.title = `NYC data last updated ${formatDate(data.snapshot)}`;
       loading.hidden = true;
       renderRoute();

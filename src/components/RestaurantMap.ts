@@ -20,16 +20,13 @@ import {
 import { prefetchInspections } from "../data/client";
 import { hasCoordinates } from "../data/model.mjs";
 import { MAX_MAP_ZOOM } from "../data/map.mjs";
+import { mapStyles } from "../data/map-resources";
 import { titleCase } from "../data/presentation.mjs";
 import { gradeImage, icon } from "./shared";
 
 // Bundle the module worker with Vite so relative-path static deployments work.
 setWorkerUrl(workerUrl);
 
-const mapStyles = {
-  light: "https://tiles.openfreemap.org/styles/bright",
-  dark: "https://tiles.openfreemap.org/styles/fiord",
-};
 // Navigation history and the clustering worker use a 256px world at zoom 0.
 // MapLibre uses 512px, so convert only at the renderer boundary.
 const toMapZoom = (zoom: number) => zoom - 1;
@@ -125,15 +122,16 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
       cityBounds.getEast() + lonPad,
       cityBounds.getSouth() - latPad,
     ]);
-    const hasSize = () => element.clientWidth > 0 && element.clientHeight > 0;
+    // Read the initial box once; subsequent measurements come from the browser's
+    // layout pass. Camera constraints run on every movement and must not force
+    // layout after MapLibre has written marker/canvas styles.
+    let viewportWidth = element.clientWidth;
+    let viewportHeight = element.clientHeight;
+    const hasSize = () => viewportWidth > 0 && viewportHeight > 0;
     const fitOptions = () => ({
       padding: Math.max(
         0,
-        Math.min(
-          35,
-          (element.clientWidth - 1) / 2,
-          (element.clientHeight - 1) / 2,
-        ),
+        Math.min(35, (viewportWidth - 1) / 2, (viewportHeight - 1) / 2),
       ),
       maxZoom: toMapZoom(16),
       duration: 0,
@@ -174,13 +172,13 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
               point.x,
               northWest.x,
               southEast.x,
-              element.clientWidth / worldSize / 2,
+              viewportWidth / worldSize / 2,
             ),
             clampAxis(
               point.y,
               northWest.y,
               southEast.y,
-              element.clientHeight / worldSize / 2,
+              viewportHeight / worldSize / 2,
             ),
           ).toLngLat(),
           zoom,
@@ -513,19 +511,21 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
     };
     const reconcileSize = () => {
       // Preserve the current center when the inline details panel changes width.
-      const size = `${element.clientWidth}:${element.clientHeight}`;
+      const size = `${viewportWidth}:${viewportHeight}`;
       if (size === measuredSize) return;
       measuredSize = size;
+      // MapLibre measures its container when resizing. Finish those reads before
+      // changing inherited popup variables, which would invalidate its styles.
+      map.resize();
+      updateMinimumZoom();
       element.style.setProperty(
         "--map-popup-width",
-        `${Math.max(100, element.clientWidth - 24)}px`,
+        `${Math.max(100, viewportWidth - 24)}px`,
       );
       element.style.setProperty(
         "--map-popup-height",
-        `${Math.max(40, Math.min(280, element.clientHeight - 100))}px`,
+        `${Math.max(40, Math.min(280, viewportHeight - 100))}px`,
       );
-      map.resize();
-      updateMinimumZoom();
     };
     const applyCameraRequest = () => {
       if (disposed || !hasSize()) return;
@@ -658,8 +658,13 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
       update();
     };
     const firstFrame = requestAnimationFrame(resume);
-    const observer = new ResizeObserver(() => {
+    const observer = new ResizeObserver((entries) => {
       if (disposed) return;
+      const entry = entries.find((value) => value.target === element);
+      if (!entry) return;
+      // The map has no padding or border, so its content box is its viewport.
+      viewportWidth = Math.round(entry.contentRect.width);
+      viewportHeight = Math.round(entry.contentRect.height);
       if (!hasSize()) {
         invalidateViewport();
         cancelAnimationFrame(cameraFrame);

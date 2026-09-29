@@ -22,6 +22,14 @@
 }
 .data-source {
   font-size: var(--text-7);
+  flex-shrink: 0;
+  width: 18ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.data-source.is-loading {
+  visibility: hidden;
 }
 .navigation-dropdown {
   flex-shrink: 0;
@@ -41,8 +49,20 @@ svg.feather {
   gap: var(--space-3);
 }
 .app-main {
+  position: relative;
   padding: var(--space-3);
   overflow: hidden;
+}
+/* The status overlays the reserved workspace instead of pushing it down. */
+.data-loading {
+  position: absolute;
+  z-index: 5;
+  top: 50%;
+  left: var(--space-3);
+  right: var(--space-3);
+  transform: translateY(-50%);
+  text-align: center;
+  background: var(--background);
 }
 .search-toolbar {
   flex-shrink: 0;
@@ -346,6 +366,15 @@ button.violation-code {
     font-size: var(--text-8);
     line-height: 1.2;
     text-align: right;
+    width: 11ch;
+  }
+  .data-source > span {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .site-header .data-source {
+    padding-inline: 0;
   }
   .filter-bar .choice-dropdown {
     max-width: none;
