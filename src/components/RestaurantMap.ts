@@ -13,6 +13,11 @@ import { hasCoordinates } from "../data/model.mjs";
 import { titleCase } from "../data/presentation.mjs";
 import { gradeImage, icon } from "./shared";
 
+const clusterCountFormat = new Intl.NumberFormat("en", {
+  notation: "compact",
+  maximumSignificantDigits: 2,
+});
+
 export type MapCamera = { lat: number; lon: number; zoom: number };
 export type CameraRequest = { key: string; view: MapCamera | null };
 
@@ -250,7 +255,7 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
         const button = document.createElement("button");
         button.type = "button";
         if (p.cluster) {
-          button.textContent = p.point_count.toLocaleString();
+          button.textContent = clusterCountFormat.format(p.point_count);
           button.setAttribute("aria-label", `${p.point_count} restaurants`);
           const marker = L.marker([lat, lon], {
             keyboard: false,
