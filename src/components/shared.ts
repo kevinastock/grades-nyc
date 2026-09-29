@@ -5,14 +5,17 @@ import gradeC from "../../design/grade-avatars/grade-c.svg?url";
 import gradePending from "../../design/grade-avatars/grade-pending.svg?url";
 import gradeUngraded from "../../design/grade-avatars/grade-ungraded.svg?url";
 
+let dateFormatter: Intl.DateTimeFormat | undefined;
+
 export function formatDate(value: string | null | undefined) {
   if (!value) return "Not available";
-  return new Intl.DateTimeFormat("en-US", {
+  dateFormatter ??= new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
     year: "numeric",
     timeZone: "UTC",
-  }).format(new Date(`${value.slice(0, 10)}T12:00:00Z`));
+  });
+  return dateFormatter.format(new Date(`${value.slice(0, 10)}T12:00:00Z`));
 }
 
 // Import the approved artwork directly so every view uses the same composition.

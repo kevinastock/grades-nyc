@@ -17,7 +17,12 @@ import {
   DATA_MINIMUMS,
   validateDataHealth,
 } from "../scripts/validate-data.mjs";
-import { validateSummary } from "../src/data/manifest.mjs";
+import {
+  validateSummary,
+  SCHEMA_VERSION,
+  MANIFEST_FILE,
+  LEGACY_MANIFEST_FILE,
+} from "../src/data/manifest.mjs";
 
 const smallMinimums = { restaurants: 0, violationTypes: 0 };
 const basic = {
@@ -71,7 +76,7 @@ async function outputBytes(directory) {
 
 async function readSnapshot(directory) {
   const manifest = JSON.parse(
-    await readFile(path.join(directory, "manifest.json"), "utf8"),
+    await readFile(path.join(directory, MANIFEST_FILE), "utf8"),
   );
   const summary = validateSummary(
     JSON.parse(
@@ -152,7 +157,7 @@ cp -- "$NYC_TEST_CSV" "$output"
     assert.equal(await downloads(), 1);
     assert.equal(await readFile(cache, "utf8"), fixture());
     const { manifest, summary } = await readSnapshot(output);
-    assert.equal(manifest.schemaVersion, 3);
+    assert.equal(manifest.schemaVersion, SCHEMA_VERSION);
     assert.equal(manifest.snapshot, "2026-09-26");
     assert.equal(manifest.rowCount, 1);
     assert.equal(summary.restaurants[0].id, "00123456");
@@ -162,7 +167,7 @@ cp -- "$NYC_TEST_CSV" "$output"
     await noTemporaryFiles();
 
     // A cached source must still regenerate missing output on every build.
-    await rm(path.join(output, "manifest.json"));
+    await rm(path.join(output, MANIFEST_FILE));
     await run();
     assert.equal(await downloads(), 1);
     assert.deepEqual(await outputBytes(output), initial);
@@ -180,7 +185,7 @@ cp -- "$NYC_TEST_CSV" "$output"
     assert.equal((await readSnapshot(output)).manifest.snapshot, "2026-09-27");
     const beforeFailure = await outputBytes(output);
     for (const [file, digest] of Object.entries(initial))
-      if (file !== "manifest.json")
+      if (file !== MANIFEST_FILE && file !== LEGACY_MANIFEST_FILE)
         assert.equal(
           beforeFailure[file],
           digest,

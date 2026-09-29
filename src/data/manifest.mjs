@@ -1,4 +1,7 @@
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
+export const MANIFEST_FILE = "manifest-v4.json";
+export const LEGACY_SCHEMA_VERSION = 3;
+export const LEGACY_MANIFEST_FILE = "manifest.json";
 export const DETAIL_BUCKETS = 256;
 export const SUMMARY_FIELDS = [
   "id",
@@ -28,8 +31,8 @@ export function detailBucket(id) {
 export const bucketName = (index) =>
   `details-${index.toString(16).padStart(2, "0")}`;
 
-export function validateManifest(value) {
-  if (!value || value.schemaVersion !== SCHEMA_VERSION)
+export function validateManifest(value, schemaVersion = SCHEMA_VERSION) {
+  if (!value || value.schemaVersion !== schemaVersion)
     throw new Error("Unsupported data format. Regenerate the inspection data.");
   if (
     typeof value.snapshot !== "string" ||
@@ -63,18 +66,138 @@ export const snapshotAssets = (manifest) => [
   ...manifest.details,
 ];
 
-/** Serialize each restaurant field once, preserving row order and null values. */
-export function encodeRestaurantColumns(rows) {
+const DICTIONARY_FIELDS = new Set([
+  "borough",
+  "zip",
+  "cuisine",
+  "grade",
+  "closure",
+]);
+
+/** Losslessly compact repeated column values, retaining identifiers verbatim. */
+export function encodeRestaurantColumns(rows, { compact = true } = {}) {
   const columns = Object.fromEntries(
     SUMMARY_FIELDS.map((field) => [field, []]),
   );
   for (const row of rows)
     for (const field of SUMMARY_FIELDS) columns[field].push(row[field]);
+  if (!compact) return columns;
+  const previous = new Map();
+  for (const field of SUMMARY_FIELDS) {
+    const values = columns[field];
+    const serialized = JSON.stringify(values);
+    if (field !== "id" && values.length) {
+      if (previous.has(serialized)) {
+        columns[field] = { ref: previous.get(serialized) };
+      } else if (values.every((value) => value === values[0])) {
+        const constant = { constant: values[0] };
+        if (JSON.stringify(constant).length < serialized.length)
+          columns[field] = constant;
+      } else if (DICTIONARY_FIELDS.has(field)) {
+        const dictionary = [],
+          lookup = new Map();
+        const indices = values.map((value) => {
+          if (!lookup.has(value)) {
+            lookup.set(value, dictionary.length);
+            dictionary.push(value);
+          }
+          return lookup.get(value);
+        });
+        const encoded = { values: dictionary, indices };
+        if (JSON.stringify(encoded).length < serialized.length)
+          columns[field] = encoded;
+      }
+    }
+    if (!previous.has(serialized)) previous.set(serialized, field);
+  }
   return columns;
 }
 
-/** Expand already shape-checked columns into the objects used by the UI. */
+function validEncodedValue(field, value) {
+  if (["lat", "lon"].includes(field))
+    return value === null || Number.isFinite(value);
+  if (field === "closure") return value === "none" || value === "uncertain";
+  if (
+    [
+      "grade",
+      "grade_date",
+      "grade_inspected",
+      "latest_date",
+      "closed_date",
+    ].includes(field)
+  )
+    return value === null || typeof value === "string";
+  return typeof value === "string";
+}
+
+/** Validate compact shapes before expanding any column. Earlier-only references
+ * make cycles impossible; row allocation is bounded by the plain ID column. */
+function expandRestaurantColumns(columns, count) {
+  const expanded = Object.create(null);
+  if (
+    !columns ||
+    typeof columns !== "object" ||
+    Array.isArray(columns) ||
+    Object.keys(columns).length !== SUMMARY_FIELDS.length ||
+    !Number.isSafeInteger(count) ||
+    count < 0 ||
+    !Array.isArray(columns.id) ||
+    columns.id.length !== count
+  )
+    throw new Error("Invalid restaurant summary columns.");
+  for (const field of SUMMARY_FIELDS) {
+    if (!Object.hasOwn(columns, field))
+      throw new Error("Invalid restaurant summary columns.");
+    const column = columns[field];
+    if (Array.isArray(column)) {
+      if (column.length !== count)
+        throw new Error("Invalid restaurant summary columns.");
+      expanded[field] = column;
+      continue;
+    }
+    if (!column || typeof column !== "object")
+      throw new Error("Invalid restaurant summary columns.");
+    const keys = Object.keys(column);
+    if (keys.length === 1 && Object.hasOwn(column, "ref")) {
+      if (
+        typeof column.ref !== "string" ||
+        !Object.hasOwn(expanded, column.ref)
+      )
+        throw new Error("Invalid restaurant summary column reference.");
+      expanded[field] = expanded[column.ref];
+    } else if (keys.length === 1 && Object.hasOwn(column, "constant")) {
+      if (!validEncodedValue(field, column.constant))
+        throw new Error("Invalid restaurant summary record.");
+      expanded[field] = Array(count).fill(column.constant);
+    } else if (
+      keys.length === 2 &&
+      Object.hasOwn(column, "values") &&
+      Object.hasOwn(column, "indices")
+    ) {
+      if (
+        !Array.isArray(column.values) ||
+        !Array.isArray(column.indices) ||
+        column.values.length > count ||
+        (!column.values.length && count) ||
+        column.indices.length !== count ||
+        column.values.some((value) => !validEncodedValue(field, value)) ||
+        column.indices.some(
+          (index) =>
+            !Number.isSafeInteger(index) ||
+            index < 0 ||
+            index >= column.values.length,
+        )
+      )
+        throw new Error("Invalid restaurant summary dictionary.");
+      expanded[field] = column.indices.map((index) => column.values[index]);
+    } else throw new Error("Invalid restaurant summary columns.");
+  }
+  return expanded;
+}
+
+/** Expand compact columns into the unchanged objects used by the UI. */
 export function decodeRestaurantColumns(columns) {
+  columns = expandRestaurantColumns(columns, columns?.id?.length);
   const rows = new Array(columns.id.length);
   for (let i = 0; i < rows.length; i++) {
     rows[i] = {
@@ -105,12 +228,8 @@ export function validateSummary(value, manifest) {
     typeof value.restaurants !== "object" ||
     Array.isArray(value.restaurants) ||
     Object.keys(value.restaurants).length !== SUMMARY_FIELDS.length ||
-    SUMMARY_FIELDS.some(
-      (field) =>
-        !Object.hasOwn(value.restaurants, field) ||
-        !Array.isArray(value.restaurants[field]) ||
-        value.restaurants[field].length !== manifest.summary.rows,
-    ) ||
+    !Array.isArray(value.restaurants.id) ||
+    value.restaurants.id.length !== manifest.summary.rows ||
     !Array.isArray(value.violations) ||
     !Array.isArray(value.definitions) ||
     !Array.isArray(value.cuisines) ||
@@ -121,27 +240,23 @@ export function validateSummary(value, manifest) {
   const ids = new Set();
   for (const row of restaurants) {
     if (
-      [
-        "id",
-        "name",
-        "borough",
-        "address",
-        "zip",
-        "cuisine",
-        "latest_codes",
-      ].some((key) => typeof row[key] !== "string") ||
+      typeof row.id !== "string" ||
+      typeof row.name !== "string" ||
+      typeof row.borough !== "string" ||
+      typeof row.address !== "string" ||
+      typeof row.zip !== "string" ||
+      typeof row.cuisine !== "string" ||
+      typeof row.latest_codes !== "string" ||
       ids.has(row.id) ||
-      !["none", "uncertain"].includes(row.closure) ||
-      ["lat", "lon"].some(
-        (key) => row[key] !== null && !Number.isFinite(row[key]),
-      ) ||
-      [
-        "grade",
-        "grade_date",
-        "grade_inspected",
-        "latest_date",
-        "closed_date",
-      ].some((key) => row[key] !== null && typeof row[key] !== "string")
+      (row.closure !== "none" && row.closure !== "uncertain") ||
+      (row.lat !== null && !Number.isFinite(row.lat)) ||
+      (row.lon !== null && !Number.isFinite(row.lon)) ||
+      (row.grade !== null && typeof row.grade !== "string") ||
+      (row.grade_date !== null && typeof row.grade_date !== "string") ||
+      (row.grade_inspected !== null &&
+        typeof row.grade_inspected !== "string") ||
+      (row.latest_date !== null && typeof row.latest_date !== "string") ||
+      (row.closed_date !== null && typeof row.closed_date !== "string")
     )
       throw new Error("Invalid restaurant summary record.");
     ids.add(row.id);

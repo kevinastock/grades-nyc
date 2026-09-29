@@ -154,7 +154,10 @@ const rows = [
     "VIOLATION DESCRIPTION": "",
     "CRITICAL FLAG": "",
   }),
-  record("001007", "CAFE KATZ TEST", "09/20/2026"),
+  record("001007", "CAFE KATZ TEST", "09/20/2026", {
+    Latitude: "40.71278371",
+    Longitude: "-74.00594059",
+  }),
 ];
 const csvRow = (values) =>
   values
@@ -383,7 +386,17 @@ test("generated JSON preserves all retained summary fields and complete bucketed
       (b.latest_date || "").localeCompare(a.latest_date || "") ||
       a.name.localeCompare(b.name),
   );
-  assert.deepEqual(summary.restaurants, expected);
+  assert.deepEqual(
+    summary.restaurants,
+    expected.map((restaurant) =>
+      restaurant.id === "001007"
+        ? { ...restaurant, lat: 40.712784, lon: -74.005941 }
+        : restaurant,
+    ),
+  );
+  const rounded = summary.restaurants.find((r) => r.id === "001007");
+  assert.ok(Math.abs(rounded.lat - 40.71278371) <= 0.0000005);
+  assert.ok(Math.abs(rounded.lon - -74.00594059) <= 0.0000005);
   assert.deepEqual(
     summary.restaurants.map((r) => r.id),
     ["001001", "001005", "001006", "001007", "001004", "001003"],

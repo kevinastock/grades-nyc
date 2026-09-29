@@ -14,6 +14,9 @@ import { MODEL_SQL, CATALOG_SQL } from "./model.mjs";
 import { DATA_MINIMUMS, validateDataHealth } from "./validate-data.mjs";
 import {
   SCHEMA_VERSION,
+  MANIFEST_FILE,
+  LEGACY_SCHEMA_VERSION,
+  LEGACY_MANIFEST_FILE,
   SUMMARY_FIELDS,
   encodeRestaurantColumns,
   DETAIL_BUCKETS,
@@ -62,7 +65,9 @@ FROM read_csv(${sqlString(input)}, header=true, all_varchar=true);
       sql += `\nALTER TABLE ${name} RENAME TO source_${name};`;
     sql += MODEL_SQL;
     const exports = {
-      restaurants: `SELECT ${SUMMARY_FIELDS.map((key) => (["lat", "lon"].includes(key) ? `CASE WHEN isfinite(${key}) THEN ${key} ELSE NULL END AS ${key}` : key)).join(",")} FROM restaurants ORDER BY name,id`,
+      // Six decimal places keep sub-metre map positions while avoiding the
+      // source's excess coordinate precision in every startup summary.
+      restaurants: `SELECT ${SUMMARY_FIELDS.map((key) => (["lat", "lon"].includes(key) ? `CASE WHEN isfinite(${key}) THEN round(${key}, 6) ELSE NULL END AS ${key}` : key)).join(",")} FROM restaurants ORDER BY name,id`,
       catalog: CATALOG_SQL,
       definitions:
         "SELECT code, description, critical FROM source_violations ORDER BY violation_id",
@@ -147,19 +152,41 @@ FROM read_csv(${sqlString(input)}, header=true, all_varchar=true);
       }
       manifest.details.push(await asset(bucketName(index), bucket, rows));
     }
+    // Cached schema-3 clients still request manifest.json. Publish a plain-column
+    // summary for them from the same rows and definition IDs as the compact one.
+    const legacySummary = {
+      ...summary,
+      restaurants: encodeRestaurantColumns(restaurants, { compact: false }),
+    };
+    const legacyManifest = {
+      ...manifest,
+      schemaVersion: LEGACY_SCHEMA_VERSION,
+      summary: await asset("summary", legacySummary, restaurants.length),
+    };
     validateManifest(manifest);
+    validateManifest(legacyManifest, LEGACY_SCHEMA_VERSION);
     validateSummary(summary, manifest);
-    await writeFile(
-      path.join(staging, "manifest.json"),
-      JSON.stringify(manifest, null, 2) + "\n",
+    validateSummary(legacySummary, legacyManifest);
+    const manifests = [
+      [MANIFEST_FILE, manifest],
+      [LEGACY_MANIFEST_FILE, legacyManifest],
+    ];
+    for (const [file, value] of manifests)
+      await writeFile(
+        path.join(staging, file),
+        JSON.stringify(value, null, 2) + "\n",
+      );
+    // Both independently readable manifests are published only after all their
+    // immutable assets. An empty summary can share its hash across both formats.
+    const files = new Set(
+      [...snapshotAssets(manifest), legacyManifest.summary].map(
+        ({ file }) => file,
+      ),
     );
-    // Preserve old immutable assets for clients holding an earlier manifest.
-    for (const { file } of snapshotAssets(manifest))
+    for (const file of files)
       await rename(path.join(staging, file), path.join(output, file));
-    await rename(
-      path.join(staging, "manifest.json"),
-      path.join(output, "manifest.json"),
-    );
+    for (const [file] of manifests)
+      await rename(path.join(staging, file), path.join(output, file));
     return manifest;
   } finally {
     await rm(staging, { recursive: true, force: true });

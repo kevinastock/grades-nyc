@@ -6,6 +6,7 @@ import {
   LngLatBounds,
   MercatorCoordinate,
   setWorkerUrl,
+  type StyleSpecification,
 } from "maplibre-gl";
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -20,7 +21,8 @@ import {
 import { prefetchInspections } from "../data/client";
 import { hasCoordinates } from "../data/model.mjs";
 import { MAX_MAP_ZOOM } from "../data/map.mjs";
-import { mapStyles } from "../data/map-resources";
+import { restaurantBounds, startupMapBounds } from "../data/map-startup.mjs";
+import { loadBasemapStyle, mapStyles } from "../data/map-resources";
 import { titleCase } from "../data/presentation.mjs";
 import { gradeImage, icon } from "./shared";
 
@@ -41,8 +43,10 @@ export type MapCamera = { lat: number; lon: number; zoom: number };
 export type CameraRequest = { key: string; view: MapCamera | null };
 
 export type MapProps = {
-  explorer: ExplorerClient;
-  result: QueryResult;
+  explorer: ExplorerClient | null;
+  result: QueryResult | null;
+  dataReady: boolean;
+  fitToResults?: boolean;
   restaurants: Map<string, Restaurant>;
   selectedId: string | null;
   cameraRequest: CameraRequest;
@@ -97,31 +101,33 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
     const messages = tileError ? ["Map tiles unavailable."] : [];
     if (selected && !hasCoordinates(selected))
       messages.push(`${titleCase(selected.name)} has no map location.`);
-    else if (!result.mapped) messages.push("No mapped locations.");
+    else if (result && !result.mapped) messages.push("No mapped locations.");
     message.textContent = messages.join(" ");
     message.hidden = messages.length === 0;
   }
 
   function mountMap() {
-    const { explorer, restaurants } = props;
     // Search results must not change the citywide navigation limits.
-    const cityBounds = new LngLatBounds();
-    for (const restaurant of restaurants.values()) {
-      if (hasCoordinates(restaurant))
-        cityBounds.extend([restaurant.lon!, restaurant.lat!]);
-    }
-    if (cityBounds.isEmpty())
-      cityBounds.extend([-74.2492, 40.4995]).extend([-73.7009, 40.9129]);
-    const latPad = (cityBounds.getNorth() - cityBounds.getSouth()) * 0.05;
-    const lonPad = (cityBounds.getEast() - cityBounds.getWest()) * 0.05;
-    const northWest = MercatorCoordinate.fromLngLat([
-      cityBounds.getWest() - lonPad,
-      cityBounds.getNorth() + latPad,
-    ]);
-    const southEast = MercatorCoordinate.fromLngLat([
-      cityBounds.getEast() + lonPad,
-      cityBounds.getSouth() - latPad,
-    ]);
+    let cityBounds!: LngLatBounds;
+    let northWest!: MercatorCoordinate;
+    let southEast!: MercatorCoordinate;
+    const updateCityBounds = () => {
+      const [west, south, east, north] = props.dataReady
+        ? restaurantBounds(props.restaurants.values())
+        : startupMapBounds();
+      cityBounds = new LngLatBounds([west, south, east, north]);
+      const latPad = (north - south) * 0.05;
+      const lonPad = (east - west) * 0.05;
+      northWest = MercatorCoordinate.fromLngLat([
+        west - lonPad,
+        north + latPad,
+      ]);
+      southEast = MercatorCoordinate.fromLngLat([
+        east + lonPad,
+        south - latPad,
+      ]);
+    };
+    updateCityBounds();
     // Read the initial box once; subsequent measurements come from the browser's
     // layout pass. Camera constraints run on every movement and must not force
     // layout after MapLibre has written marker/canvas styles.
@@ -195,10 +201,15 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
     element
       .querySelector(".maplibregl-ctrl-zoom-out")
       ?.replaceChildren(icon("minus"));
+    let userMoved = false;
+    let applyingCamera = false;
     const updateMinimumZoom = () => {
       minimumZoom = 0;
       map.setMinZoom(0);
       minimumZoom = map.cameraForBounds(cityBounds, fitOptions())?.zoom ?? 0;
+      // A fresh dataset may have narrower bounds. Keep a camera the user has
+      // already chosen until their next deliberate navigation.
+      if (userMoved) minimumZoom = Math.min(minimumZoom, map.getZoom());
       map.setMinZoom(minimumZoom);
     };
     const markers = new Map<string, Marker>();
@@ -208,6 +219,7 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
     let frame = 0;
     let cameraFrame = 0;
     let appliedCameraKey: string | null = null;
+    let pendingDataCamera = false;
     let reportedCamera = "";
     let selectedMarker: Marker | null = null;
     let popup: Popup | null = null;
@@ -252,7 +264,7 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
       selectedMarker?.remove();
       selectedMarker = null;
       if (!id) return;
-      const restaurant = restaurants.get(id);
+      const restaurant = props.restaurants.get(id);
       if (!restaurant || !hasCoordinates(restaurant)) return;
       // Selected places remain visible independently of the cluster index.
       const ordinary = markers.get(`restaurant-${id}`);
@@ -309,6 +321,8 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
             event.stopPropagation();
             closePopup();
             const token = ++interaction;
+            const explorer = props.explorer;
+            if (!explorer) return;
             void explorer
               .expand(revision, p.cluster_id)
               .then((expanded) => {
@@ -317,7 +331,8 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
                   !hasSize() ||
                   !expanded ||
                   token !== interaction ||
-                  props.result.revision !== revision
+                  props.explorer !== explorer ||
+                  props.result?.revision !== revision
                 )
                   return;
                 if (expanded.zoom <= MAX_MAP_ZOOM) {
@@ -333,7 +348,7 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
                 title.textContent = `${p.point_count} places here`;
                 list.append(title);
                 for (const id of expanded.ids) {
-                  const place = restaurants.get(id);
+                  const place = props.restaurants.get(id);
                   if (!place) continue;
                   const choice = document.createElement("button");
                   choice.type = "button";
@@ -391,12 +406,21 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
                   if (dx || dy) map.panBy([dx, dy], { duration: 0 });
                 });
               })
-              .catch(fail);
+              .catch((error) => {
+                if (
+                  disposed ||
+                  token !== interaction ||
+                  props.explorer !== explorer ||
+                  props.result?.revision !== revision
+                )
+                  return;
+                fail(error);
+              });
           });
           marker.addTo(map);
           markers.set(key, marker);
         } else {
-          const restaurant = restaurants.get(p.id);
+          const restaurant = props.restaurants.get(p.id);
           if (!restaurant) continue;
           button.setAttribute("aria-label", label(restaurant));
           button.append(gradeImage(restaurant.grade));
@@ -432,7 +456,10 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
         appliedCameraKey !== props.cameraRequest.key
       )
         return;
-      const revision = props.result.revision;
+      // Persist a deliberate early pan even while restaurant data is loading,
+      // so leaving this route can restore it. Provisional startup fits must not
+      // become saved cameras before selected/filter bounds are available.
+      if (!userMoved && (!props.explorer || !props.result)) return;
       const requestCameraKey = appliedCameraKey;
       const b = map.getBounds();
       const bounds = {
@@ -454,6 +481,9 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
           bounds,
         );
       }
+      if (!props.explorer || !props.result) return;
+      const revision = props.result.revision;
+      const explorer = props.explorer;
       const key = `${revision}:${map.getZoom()}:${Object.values(bounds)
         .map((v) => v.toFixed(9))
         .join(":")}`;
@@ -469,7 +499,8 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
             zooming ||
             !hasSize() ||
             sequence !== viewSequence ||
-            revision !== props.result.revision ||
+            revision !== props.result?.revision ||
+            explorer !== props.explorer ||
             requestCameraKey !== props.cameraRequest.key
           )
             return;
@@ -492,7 +523,7 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
       frame = requestAnimationFrame(update);
     };
     const fit = () => {
-      const bounds = props.result.bounds;
+      const bounds = props.result?.bounds;
       if (bounds) {
         if (bounds.west === bounds.east && bounds.north === bounds.south)
           map.jumpTo({
@@ -529,10 +560,19 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
     };
     const applyCameraRequest = () => {
       if (disposed || !hasSize()) return;
+      applyingCamera = true;
       reconcileSize();
       const { cameraRequest: request, selectedId: id } = props;
-      if (appliedCameraKey === request.key) return;
-      const selected = id ? restaurants.get(id) : null;
+      if (appliedCameraKey === request.key) {
+        applyingCamera = false;
+        return;
+      }
+      const selected = id ? props.restaurants.get(id) : null;
+      // A saved camera is authoritative immediately. Otherwise selected and
+      // filtered links need their records before the first tile request.
+      const waiting =
+        !request.view &&
+        ((!!id && !props.dataReady) || (!!props.fitToResults && !props.result));
       if (request.view) {
         const { lat, lon, zoom } = request.view;
         map.jumpTo({ center: [lon, lat], zoom: toMapZoom(zoom) });
@@ -546,14 +586,21 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
       } else if (!selected || !initialized) {
         fit();
       }
+      pendingDataCamera = !request.view && !props.result;
       // A selected record without coordinates leaves an existing view intact.
       appliedCameraKey = request.key;
+      applyingCamera = false;
       renderSelection();
       requestedView = "";
-      if (initialized) schedule();
+      if (initialized && !waiting) {
+        applyStyle();
+        schedule();
+      }
     };
     const controls = {
       navigate() {
+        userMoved = false;
+        pendingDataCamera = false;
         interaction++;
         invalidateViewport();
         closePopup();
@@ -563,48 +610,67 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
         // Allow the new panel layout and resize
         // observers to settle before centering in the map's new dimensions.
         cameraFrame = requestAnimationFrame(() => {
-          cameraFrame = requestAnimationFrame(applyCameraRequest);
+          cameraFrame = requestAnimationFrame(() => {
+            cameraFrame = 0;
+            applyCameraRequest();
+          });
         });
       },
-      refresh() {
+      dataChanged(restaurantsChanged: boolean) {
         interaction++;
+        invalidateViewport();
         closePopup();
-        if (!initialized || !hasSize()) return;
-        schedule();
+        if (restaurantsChanged) {
+          updateCityBounds();
+          for (const marker of markers.values()) marker.remove();
+          markers.clear();
+          selectedMarker?.remove();
+          selectedMarker = null;
+          markedSelection = null;
+          applyingCamera = true;
+          if (hasSize()) updateMinimumZoom();
+          applyingCamera = false;
+        }
+        if (pendingDataCamera && !userMoved) appliedCameraKey = null;
+        if (props.result) pendingDataCamera = false;
+        // Navigation waits for the details panel's layout. A fast worker reply
+        // must not fit that pending camera using the preceding viewport size.
+        if (cameraFrame) return;
+        applyCameraRequest();
+        renderSelection();
+        if (initialized) {
+          applyStyle();
+          schedule();
+        }
       },
     };
     const colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
     let currentStyle = "";
+    let styleSequence = 0;
     const applyStyle = () => {
+      if (
+        !props.cameraRequest.view &&
+        ((props.selectedId && !props.dataReady) ||
+          (props.fitToResults && !props.result))
+      )
+        return;
       const style = colorScheme.matches ? mapStyles.dark : mapStyles.light;
       if (style === currentStyle) return;
       currentStyle = style;
+      const sequence = ++styleSequence;
       tileError = false;
       renderStatus();
-      map.setStyle(style, {
-        transformStyle: (_previous, next) => ({
-          ...next,
-          layers: next.layers.map((layer) => {
-            // Bright's data includes POI classes absent from its sprite sheet.
-            // Keep their labels and use its generic symbol when an icon is missing.
-            if (layer.type !== "symbol" || !layer.id.startsWith("poi"))
-              return layer;
-            const image = layer.layout?.["icon-image"];
-            if (!Array.isArray(image)) return layer;
-            return {
-              ...layer,
-              layout: {
-                ...layer.layout,
-                "icon-image": [
-                  "coalesce",
-                  ["image", image],
-                  ["image", "circle"],
-                ],
-              },
-            };
-          }),
-        }),
-      });
+      void loadBasemapStyle(style)
+        .then((loadedStyle: StyleSpecification) => {
+          if (disposed || sequence !== styleSequence) return;
+          map.setStyle(loadedStyle, { diff: true });
+        })
+        .catch(() => {
+          if (disposed || sequence !== styleSequence) return;
+          currentStyle = "";
+          tileError = true;
+          renderStatus();
+        });
     };
     const themeChanged = () => {
       if (!disposed && initialized) applyStyle();
@@ -639,6 +705,7 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
         invalidateViewport();
       });
       map.on("movestart", () => {
+        if (!applyingCamera) userMoved = true;
         moving = true;
         interaction++;
         invalidateViewport();
@@ -697,7 +764,7 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
     };
   }
 
-  let controls = mountMap();
+  const controls = mountMap();
   renderStatus();
   return {
     update(next: MapProps) {
@@ -706,17 +773,18 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
       props = next;
       if (
         next.explorer !== previous.explorer ||
-        next.restaurants !== previous.restaurants
+        next.restaurants !== previous.restaurants ||
+        next.dataReady !== previous.dataReady
       ) {
-        controls.destroy();
-        tileError = false;
-        controls = mountMap();
-      } else {
-        if (next.cameraRequest.key !== previous.cameraRequest.key)
-          controls.navigate();
-        if (next.selectedId !== previous.selectedId) controls.selection();
-        if (next.result !== previous.result) controls.refresh();
+        controls.dataChanged(
+          next.restaurants !== previous.restaurants ||
+            next.dataReady !== previous.dataReady,
+        );
       }
+      if (next.cameraRequest.key !== previous.cameraRequest.key)
+        controls.navigate();
+      if (next.selectedId !== previous.selectedId) controls.selection();
+      if (next.result !== previous.result) controls.dataChanged(false);
       renderStatus();
     },
     destroy() {

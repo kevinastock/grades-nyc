@@ -1,4 +1,5 @@
 import { createExplorer } from "./explorer.mjs";
+import { validateManifest, validateSummary } from "./manifest.mjs";
 
 let explorer: ReturnType<typeof createExplorer>;
 const scope = self as unknown as {
@@ -12,6 +13,26 @@ scope.onmessage = ({ data: { id, type, args } }) => {
       case "init":
         explorer = createExplorer(args[0]);
         break;
+      case "init-summary": {
+        const manifest = validateManifest(args[1]);
+        const bytes = args[0];
+        if (
+          !(bytes instanceof ArrayBuffer) ||
+          bytes.byteLength !== manifest.summary.bytes
+        )
+          throw new Error("Inspection data is incomplete. Please try again.");
+        let value;
+        try {
+          value = JSON.parse(new TextDecoder().decode(bytes));
+        } catch {
+          throw new Error("Inspection data is invalid. Please try again.");
+        }
+        explorer = createExplorer(validateSummary(value, manifest).restaurants);
+        // Only initial data loading needs columns back on the UI thread. Search
+        // retries already have their UI data and keep the small ready response.
+        if (args[2]) result = value;
+        break;
+      }
       case "query":
         result = explorer.query(args[0], args[1]);
         break;

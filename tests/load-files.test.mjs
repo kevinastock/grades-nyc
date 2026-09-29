@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   DETAIL_BUCKETS,
+  SCHEMA_VERSION,
   bucketName,
   detailBucket,
   validateManifest,
@@ -76,7 +77,7 @@ function fixture() {
   for (const r of rows)
     if (r.latest_date) buckets[detailBucket(r.id)][r.id] = [history];
   const manifest = {
-    schemaVersion: 3,
+    schemaVersion: SCHEMA_VERSION,
     snapshot: "2026-09-25",
     rowCount: 4,
     summary: asset("summary", summary, rows.length),
@@ -94,7 +95,9 @@ function mockFiles(t, f, override = () => undefined) {
     if (custom) return custom;
     const file = String(url).split("/").at(-1);
     return new Response(
-      file === "manifest.json" ? JSON.stringify(f.manifest) : f.files.get(file),
+      file === "manifest-v4.json"
+        ? JSON.stringify(f.manifest)
+        : f.files.get(file),
     );
   });
   return calls;
@@ -129,6 +132,86 @@ test("startup requests only manifest and summary; histories are cached lazily wi
     /not in this snapshot/,
   );
   assert.ok(calls.every((c) => c.url.startsWith("/nested/data/")));
+});
+
+test("search worker retries receive transferable copies of the exact loaded snapshot", async (t) => {
+  const f = fixture(),
+    calls = mockFiles(t, f),
+    loaded = await loadDataFiles("/data/");
+  const first = loaded.createExplorerData();
+  const original = new Uint8Array(first.bytes).slice();
+  const received = structuredClone(first, { transfer: [first.bytes] });
+  assert.equal(
+    first.bytes.byteLength,
+    0,
+    "the worker takes ownership of its copy",
+  );
+  assert.deepEqual(new Uint8Array(received.bytes), original);
+  assert.equal(received.manifest.snapshot, "2026-09-25");
+
+  // A later deployment must not replace the data used by a restarted worker.
+  f.manifest.snapshot = "2026-09-26";
+  f.manifest.summary.file = `summary-${"b".repeat(64)}.json`;
+  const retry = loaded.createExplorerData();
+  assert.deepEqual(new Uint8Array(retry.bytes), original);
+  assert.equal(retry.manifest.snapshot, "2026-09-25");
+  assert.equal(retry.manifest.summary.file, received.manifest.summary.file);
+  assert.equal(
+    calls.length,
+    2,
+    "worker retries do not fetch another manifest or summary",
+  );
+  assert.equal(
+    loaded.data.restaurants[0].id,
+    f.id,
+    "transferring leaves UI data intact",
+  );
+});
+
+test("startup manifest response is consumed once, with normal validation and retry behavior", async (t) => {
+  const f = fixture(),
+    calls = mockFiles(t, f);
+  t.after(() => delete globalThis.__gradesManifest);
+  globalThis.__gradesManifest = {
+    url: "https://grades.test/data/manifest-v4.json",
+    response: Promise.resolve(new Response(JSON.stringify(f.manifest))),
+  };
+  await loadDataFiles("https://grades.test/data/");
+  assert.equal(globalThis.__gradesManifest, undefined);
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].url.endsWith(f.manifest.summary.file));
+
+  globalThis.__gradesManifest = {
+    url: "https://grades.test/data/manifest-v4.json",
+    response: Promise.reject(new Error("Startup network failure")),
+  };
+  await assert.rejects(
+    loadDataFiles("https://grades.test/data/"),
+    /Startup network failure/,
+  );
+  assert.equal(globalThis.__gradesManifest, undefined);
+  await loadDataFiles("https://grades.test/data/");
+  assert.equal(calls.length, 3);
+  assert.equal(calls[1].options.cache, "no-cache");
+});
+
+test("startup manifest response does not override another deployment or abort signal", async (t) => {
+  const f = fixture(),
+    calls = mockFiles(t, f);
+  t.after(() => delete globalThis.__gradesManifest);
+  const startup = {
+    url: "https://grades.test/other/manifest-v4.json",
+    response: Promise.resolve(new Response("not consumed")),
+  };
+  globalThis.__gradesManifest = startup;
+  await loadDataFiles("https://grades.test/data/");
+  assert.equal(globalThis.__gradesManifest, startup);
+  startup.url = "https://grades.test/data/manifest-v4.json";
+  const controller = new AbortController();
+  await loadDataFiles("https://grades.test/data/", controller.signal);
+  assert.equal(globalThis.__gradesManifest, startup);
+  assert.equal(calls.length, 4);
+  assert.ok(calls[2].options.signal instanceof AbortSignal);
 });
 
 test("truncated and failed history downloads are evicted and retryable", async (t) => {
@@ -207,7 +290,7 @@ test("expired snapshots require reload instead of silently mixing new history wi
     summary: { ...f.manifest.summary, file: `summary-${"b".repeat(64)}.json` },
   };
   mockFiles(t, f, (url) => {
-    if (updated && url.endsWith("manifest.json"))
+    if (updated && url.endsWith("manifest-v4.json"))
       return new Response(JSON.stringify(newer));
     if (updated && url.endsWith(f.manifest.details[f.index].file))
       return new Response("", { status: 404 });
@@ -227,7 +310,7 @@ test("history-only corrections also expire a pruned shard", async (t) => {
   );
   let updated = false;
   mockFiles(t, f, (url) => {
-    if (updated && url.endsWith("manifest.json"))
+    if (updated && url.endsWith("manifest-v4.json"))
       return new Response(JSON.stringify(newer));
     if (updated && url.endsWith(f.manifest.details[f.index].file))
       return new Response("", { status: 410 });
@@ -240,7 +323,7 @@ test("history-only corrections also expire a pruned shard", async (t) => {
 
 test("invalid manifests, filenames and summary data are rejected", async (t) => {
   const f = fixture();
-  for (const schemaVersion of [1, 2, 4])
+  for (const schemaVersion of [1, 2, 3, SCHEMA_VERSION + 1])
     assert.throws(
       () => validateManifest({ ...f.manifest, schemaVersion }),
       /Unsupported/,
@@ -260,4 +343,22 @@ test("invalid manifests, filenames and summary data are rejected", async (t) => 
   );
   await assert.rejects(loadDataFiles("/data/"), /incomplete/);
   assert.notEqual(detailBucket("00123456"), detailBucket("123456"));
+});
+
+test("the current loader never consumes a cached schema-3 startup manifest", async (t) => {
+  const f = fixture(),
+    calls = mockFiles(t, f);
+  const legacyStartup = {
+    url: "https://grades.test/data/manifest.json",
+    response: Promise.resolve(
+      new Response(JSON.stringify({ ...f.manifest, schemaVersion: 3 })),
+    ),
+  };
+  globalThis.__gradesManifest = legacyStartup;
+  t.after(() => delete globalThis.__gradesManifest);
+  const loaded = await loadDataFiles("https://grades.test/data/");
+  assert.equal(calls[0].url, "https://grades.test/data/manifest-v4.json");
+  assert.equal(globalThis.__gradesManifest, legacyStartup);
+  assert.equal(loaded.manifest.schemaVersion, SCHEMA_VERSION);
+  assert.equal(calls.length, 2);
 });

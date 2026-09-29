@@ -5,8 +5,14 @@ import { createRestaurantSearch } from "../src/data/search.mjs";
 import { readFile, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
+import { build } from "esbuild";
+import {
+  DETAIL_BUCKETS,
+  SCHEMA_VERSION,
+  encodeRestaurantColumns,
+} from "../src/data/manifest.mjs";
 
 const criteria = {
   search: "",
@@ -370,4 +376,153 @@ test("worker client coalesces queued searches and rejects outstanding work on di
   await assert.rejects(pending, /closed/);
   assert.equal(fake.terminated, true);
   await assert.rejects(client.query(4, criteria), /closed/);
+});
+
+function mockGlobal(t, name, value) {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, name);
+  Object.defineProperty(globalThis, name, { value, configurable: true });
+  t.after(() => {
+    if (previous) Object.defineProperty(globalThis, name, previous);
+    else delete globalThis[name];
+  });
+}
+
+function summarySource(change = () => {}) {
+  const value = {
+    restaurants: encodeRestaurantColumns(
+      rows.map((row) => ({
+        zip: "00123",
+        grade_date: null,
+        grade_inspected: null,
+        closed_date: null,
+        ...row,
+      })),
+    ),
+    definitions: [],
+    violations: [],
+    cuisines: [],
+    boroughs: [],
+  };
+  change(value);
+  const bytes = new TextEncoder().encode(JSON.stringify(value)).buffer;
+  const manifest = {
+    schemaVersion: SCHEMA_VERSION,
+    snapshot: "2026-09-25",
+    rowCount: rows.length,
+    summary: {
+      file: `summary-${"a".repeat(64)}.json`,
+      bytes: bytes.byteLength,
+      rows: rows.length,
+    },
+    details: Array.from({ length: DETAIL_BUCKETS }, (_, i) => ({
+      file: `details-${i.toString(16).padStart(2, "0")}-${"a".repeat(64)}.json`,
+      bytes: 2,
+      rows: 0,
+    })),
+  };
+  return { bytes, manifest };
+}
+
+test("worker client transfers summary bytes without serializing restaurant objects", async (t) => {
+  const workers = [];
+  class Worker {
+    messages = [];
+    transfers = [];
+    constructor() {
+      workers.push(this);
+    }
+    postMessage(message, transfer) {
+      this.transfers.push(transfer);
+      this.messages.push(structuredClone(message, { transfer }));
+      queueMicrotask(() => this.onmessage({ data: { id: message.id } }));
+    }
+    terminate() {}
+  }
+  mockGlobal(t, "Worker", Worker);
+  const directory = await mkdtemp(path.join(tmpdir(), "nyc-transfer-client-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const source = await readFile(
+    new URL("../src/data/explorer-client.ts", import.meta.url),
+    "utf8",
+  );
+  const compiled = path.join(directory, "client.mjs");
+  await writeFile(
+    compiled,
+    ts.transpileModule(source, {
+      compilerOptions: {
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ES2022,
+      },
+    }).outputText,
+  );
+  const { ExplorerClient } = await import(pathToFileURL(compiled).href);
+  // A proxy cannot be structured-cloned: this would fail if the legacy array
+  // were accidentally included anywhere in the summary initialization message.
+  const restaurants = new Proxy(rows, {});
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const initializer = summarySource();
+    const client = new ExplorerClient(restaurants, initializer);
+    await client.query(attempt, criteria);
+    const worker = workers[attempt];
+    assert.equal(initializer.bytes.byteLength, 0);
+    assert.equal(worker.transfers[0].length, 1);
+    assert.equal(worker.messages[0].type, "init-summary");
+    assert.ok(worker.messages[0].args[0] instanceof ArrayBuffer);
+    assert.equal(worker.messages[0].args[1].snapshot, "2026-09-25");
+    client.dispose();
+  }
+});
+
+test("worker validates transferred summary data before enabling queries", async (t) => {
+  const responses = [];
+  const scope = { postMessage: (value) => responses.push(value) };
+  mockGlobal(t, "self", scope);
+  const directory = await mkdtemp(path.join(tmpdir(), "nyc-summary-worker-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const compiled = path.join(directory, "worker.mjs");
+  await build({
+    entryPoints: [
+      fileURLToPath(new URL("../src/data/explorer.worker.ts", import.meta.url)),
+    ],
+    outfile: compiled,
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    logLevel: "silent",
+  });
+  await import(pathToFileURL(compiled).href);
+  const initialize = (source, returnColumns = false) => {
+    scope.onmessage({
+      data: {
+        id: 1,
+        type: "init-summary",
+        args: [source.bytes, source.manifest, returnColumns],
+      },
+    });
+    return responses.pop();
+  };
+  assert.equal(initialize(summarySource()).error, undefined);
+  const source = summarySource();
+  const compact = JSON.parse(new TextDecoder().decode(source.bytes));
+  const prepared = initialize(source, true);
+  assert.deepEqual(prepared.result, compact);
+  assert.equal(Array.isArray(prepared.result.restaurants), false);
+  assert.deepEqual(prepared.result.restaurants.id, ["001", "002", "004"]);
+  scope.onmessage({ data: { id: 2, type: "query", args: [7, criteria] } });
+  assert.deepEqual(responses.pop().result.ids, ["001", "002", "004"]);
+
+  const truncated = summarySource();
+  truncated.bytes = truncated.bytes.slice(0, -1);
+  assert.match(initialize(truncated).error, /incomplete/);
+  assert.match(
+    initialize(summarySource((value) => (value.restaurants.id[1] = "001")))
+      .error,
+    /Invalid restaurant summary record/,
+  );
+  const badManifest = summarySource();
+  badManifest.manifest.schemaVersion = -1;
+  assert.match(initialize(badManifest).error, /Unsupported data format/);
+  const malformed = summarySource();
+  new Uint8Array(malformed.bytes)[0] = 0;
+  assert.match(initialize(malformed).error, /Inspection data is invalid/);
 });

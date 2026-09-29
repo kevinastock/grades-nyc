@@ -17,12 +17,7 @@ export function createExplorer(restaurants) {
   let filtered = defaultRestaurants;
   let revision = -1;
   let cluster;
-  const codes = new Map(
-    restaurants.map((r) => [
-      r.id,
-      new Set(r.latest_codes.split(",").filter(Boolean)),
-    ]),
-  );
+  let codes;
   return {
     query(nextRevision, criteria) {
       const term = criteria.search.trim();
@@ -33,6 +28,13 @@ export function createExplorer(restaurants) {
         lastTerm = term;
       }
       const selected = criteria.selected || [];
+      if (criteria.watchFilter && selected.length)
+        codes ??= new Map(
+          restaurants.map((r) => [
+            r.id,
+            new Set(r.latest_codes.split(",").filter(Boolean)),
+          ]),
+        );
       filtered = searched.filter(
         (r) =>
           (!criteria.borough || r.borough === criteria.borough) &&

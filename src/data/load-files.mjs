@@ -1,17 +1,35 @@
 import {
+  MANIFEST_FILE,
   validateManifest,
   validateSummary,
   decodeInspections,
   detailBucket,
 } from "./manifest.mjs";
 
-async function fetchJson(url, asset, signal) {
-  const response = await fetch(url, {
-    signal: signal
-      ? AbortSignal.any([signal, AbortSignal.timeout(60_000)])
-      : AbortSignal.timeout(60_000),
-    ...(asset ? {} : { cache: "no-cache" }),
-  });
+async function fetchBytes(url, asset, signal) {
+  let startupResponse;
+  const startup = globalThis.__gradesManifest;
+  if (!asset && !signal && startup) {
+    // The document may start the manifest request before the application module.
+    // Consume it once, only for this deployment; retries use the normal request.
+    let absoluteUrl;
+    try {
+      absoluteUrl = new URL(url, globalThis.document?.baseURI).href;
+    } catch {
+      /* Non-browser callers can keep using their own relative fetch URLs. */
+    }
+    if (startup.url === absoluteUrl) {
+      startupResponse = startup.response;
+      delete globalThis.__gradesManifest;
+    }
+  }
+  const response = await (startupResponse ??
+    fetch(url, {
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(60_000)])
+        : AbortSignal.timeout(60_000),
+      ...(asset ? {} : { cache: "no-cache" }),
+    }));
   if (!response.ok) {
     const error = new Error(
       `Inspection data could not be loaded (${response.status}). Please try again.`,
@@ -22,11 +40,23 @@ async function fetchJson(url, asset, signal) {
   const bytes = await response.arrayBuffer();
   if (asset && bytes.byteLength !== asset.bytes)
     throw new Error("Inspection data is incomplete. Please try again.");
+  return bytes;
+}
+
+function parseJson(bytes) {
   try {
     return JSON.parse(new TextDecoder().decode(bytes));
   } catch {
     throw new Error("Inspection data is invalid. Please try again.");
   }
+}
+
+export function decodeSummaryBytes(bytes, manifest) {
+  return validateSummary(parseJson(bytes), manifest);
+}
+
+async function fetchJson(url, asset, signal) {
+  return parseJson(await fetchBytes(url, asset, signal));
 }
 
 function remember(cache, key, value, limit) {
@@ -37,9 +67,14 @@ function remember(cache, key, value, limit) {
 }
 
 /** One manifest pins the summary and every subsequent history request. */
-export async function loadDataFiles(baseUrl, signal, initialRestaurantId) {
+export async function loadDataFiles(
+  baseUrl,
+  signal,
+  initialRestaurantId,
+  decodeSummary,
+) {
   const manifest = validateManifest(
-    await fetchJson(`${baseUrl}manifest.json`, null, signal),
+    await fetchJson(`${baseUrl}${MANIFEST_FILE}`, null, signal),
   );
   const buckets = new Map();
   const details = new Map();
@@ -70,7 +105,7 @@ export async function loadDataFiles(baseUrl, signal, initialRestaurantId) {
           let current;
           try {
             current = validateManifest(
-              await fetchJson(`${baseUrl}manifest.json`, null, signal),
+              await fetchJson(`${baseUrl}${MANIFEST_FILE}`, null, signal),
             );
           } catch {
             /* Preserve the original, retryable request error. */
@@ -96,17 +131,22 @@ export async function loadDataFiles(baseUrl, signal, initialRestaurantId) {
   // Shared links can fetch their small history shard alongside the summary.
   if (initialRestaurantId)
     void bucket(detailBucket(initialRestaurantId)).catch(() => {});
-  const summary = validateSummary(
-    await fetchJson(
-      `${baseUrl}${manifest.summary.file}`,
-      manifest.summary,
-      signal,
-    ),
-    manifest,
+  const summaryBytes = await fetchBytes(
+    `${baseUrl}${manifest.summary.file}`,
+    manifest.summary,
+    signal,
   );
+  const summary = decodeSummary
+    ? await decodeSummary(summaryBytes, manifest)
+    : validateSummary(parseJson(summaryBytes), manifest);
   const restaurants = new Map(summary.restaurants.map((row) => [row.id, row]));
   return {
     manifest,
+    // Transfer a fresh copy to each search worker, avoiding serialization of all
+    // decoded restaurant objects. Keep the original for retries on this snapshot.
+    createExplorerData() {
+      return { bytes: summaryBytes.slice(0), manifest };
+    },
     data: {
       restaurants: summary.restaurants,
       violations: summary.violations,

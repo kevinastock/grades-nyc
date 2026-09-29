@@ -1,4 +1,9 @@
-import { loadData, prefetchInspections } from "./data/client";
+import {
+  disposePreparedExplorer,
+  loadData,
+  prefetchInspections,
+  takeExplorer,
+} from "./data/client";
 import {
   ExplorerClient,
   type QueryResult,
@@ -23,6 +28,7 @@ import {
 import { createDropdown } from "./components/Dropdown";
 import { el } from "./dom";
 import { preloadBasemap } from "./data/map-resources";
+import { yieldToBrowser } from "./scheduling";
 
 const STORAGE_KEY = "nyc-grades-watchlist-v1";
 const REPOSITORY_URL = "https://github.com/kevinastock/grades-nyc";
@@ -356,6 +362,7 @@ export function createApp(root: HTMLElement) {
     resultsExpanded = route.id ? true : !resultsExpanded;
     if (route.id) navigation.close();
     renderLayout();
+    renderResults();
     renderMap();
   }
 
@@ -375,6 +382,7 @@ export function createApp(root: HTMLElement) {
     if (patch.query !== undefined) {
       resultsExpanded = true;
       renderLayout();
+      renderResults();
       renderMap();
     }
     navigation.changeSearch(patch);
@@ -449,15 +457,24 @@ export function createApp(root: HTMLElement) {
   });
   const empty = el("div", { class: "p-4", role: "status" });
   function renderResults() {
-    if (!data) return;
+    if (!data || route.view !== "search") return;
+    if (results.hidden) {
+      restoreList();
+      return;
+    }
     const ids =
       viewport?.revision === queryResult?.revision
         ? viewport?.ids
         : queryResult?.ids;
-    const values = ids
-      ? ids.map((id) => lookup.get(id)!).filter(Boolean)
-      : defaults;
-    const visible = values.slice(0, limit);
+    // Worker results use this snapshot's IDs. Resolve only the displayed page,
+    // not all 31,000 restaurants on every viewport update.
+    const count = ids?.length ?? defaults.length;
+    const visible = ids
+      ? ids
+          .slice(0, limit)
+          .map((id) => lookup.get(id)!)
+          .filter(Boolean)
+      : defaults.slice(0, limit);
     const nodes: HTMLElement[] = [];
     const retained = new Set<string>();
     for (const restaurant of visible) {
@@ -529,7 +546,7 @@ export function createApp(root: HTMLElement) {
       nodes.push(card.node);
     }
     for (const id of cards.keys()) if (!retained.has(id)) cards.delete(id);
-    if (!values.length) {
+    if (!count) {
       empty.replaceChildren(el("p", {}, "No matching restaurants."));
       if (activeFilterCount())
         empty.append(
@@ -541,8 +558,8 @@ export function createApp(root: HTMLElement) {
         );
       nodes.push(empty);
     }
-    if (values.length > limit) {
-      more.textContent = `Show more · ${(values.length - limit).toLocaleString()} remaining`;
+    if (count > limit) {
+      more.textContent = `Show more · ${(count - limit).toLocaleString()} remaining`;
       nodes.push(more);
     }
     // Move only changed rows; stable links preserve keyboard focus during updates.
@@ -666,7 +683,7 @@ export function createApp(root: HTMLElement) {
     const filtersLabel = `Filters${count ? ` (${count} active)` : ""}`;
     filtersToggle.setAttribute("aria-label", filtersLabel);
     filtersToggle.title = filtersLabel;
-    workspace.hidden = !data;
+    workspace.hidden = !searching;
     renderDetail();
     renderLayout();
     if (data && !searching) {
@@ -696,8 +713,10 @@ export function createApp(root: HTMLElement) {
   }
   function mapProps(): MapProps {
     return {
-      explorer: explorer!,
-      result: queryResult!,
+      explorer: explorer ?? null,
+      result: queryResult,
+      dataReady: !!data,
+      fitToResults: !!route.search.query.trim() || !!activeFilterCount(),
       restaurants: lookup,
       selectedId: route.id,
       cameraRequest,
@@ -725,7 +744,10 @@ export function createApp(root: HTMLElement) {
     if (disposed || route.view !== "search") return;
     preloadBasemap();
     mapLoading ??= import("./components/RestaurantMap")
-      .then((module) => {
+      .then(async (module) => {
+        if (disposed) return;
+        // Module evaluation and GL construction can each occupy a full task.
+        await yieldToBrowser();
         if (disposed) return;
         mapModule = module;
         renderMap();
@@ -736,8 +758,7 @@ export function createApp(root: HTMLElement) {
       });
   }
   function renderMap() {
-    if (route.view !== "search" || !explorer || !queryResult || disposed)
-      return;
+    if (route.view !== "search" || disposed) return;
     if (!mapModule) {
       preloadMap();
       return;
@@ -778,8 +799,6 @@ export function createApp(root: HTMLElement) {
   }
   function startExplorer() {
     querySequence++;
-    map?.destroy();
-    map = undefined;
     explorer?.dispose();
     explorer = undefined;
     queryResult = null;
@@ -788,7 +807,7 @@ export function createApp(root: HTMLElement) {
     searchWarning.hidden = true;
     preloadMap();
     try {
-      explorer = new ExplorerClient(data!.restaurants);
+      explorer = takeExplorer(data!.restaurants);
       runQuery();
     } catch (error) {
       showSearchError(error);
@@ -863,6 +882,7 @@ export function createApp(root: HTMLElement) {
     filters.hidden = mobile.matches;
     filtersToggle.setAttribute("aria-expanded", String(!filters.hidden));
     renderLayout();
+    renderResults();
     renderMap();
   }
   mobile.addEventListener("change", resizeFilters, {
@@ -906,6 +926,7 @@ export function createApp(root: HTMLElement) {
       navigation.dispose();
       map?.destroy();
       explorer?.dispose();
+      disposePreparedExplorer();
       detail?.destroy();
       preferences?.destroy();
       for (const dropdown of [navigationMenu, borough, cuisine, grade, watch])

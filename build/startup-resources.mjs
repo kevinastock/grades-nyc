@@ -1,7 +1,18 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { validateManifest } from "../src/data/manifest.mjs";
+import { transform } from "esbuild";
+import {
+  MANIFEST_FILE,
+  validateManifest,
+  validateSummary,
+} from "../src/data/manifest.mjs";
+import { restaurantBounds } from "../src/data/map-startup.mjs";
+import {
+  mapStyles,
+  preloadBasemap,
+  createBasemapStyle,
+} from "../src/data/map-resources.mjs";
 
 const MAX_INLINE_CSS_BYTES = 48 * 1024;
 
@@ -31,11 +42,73 @@ function selfContainedCss(css) {
   );
 }
 
+function mapAssets(bundle, base, htmlPath) {
+  const map = Object.values(bundle).find(
+    (chunk) =>
+      chunk.type === "chunk" &&
+      Object.keys(chunk.modules).some((id) =>
+        /\/src\/components\/RestaurantMap\.[jt]s$/.test(
+          id.replaceAll("\\", "/"),
+        ),
+      ),
+  );
+  const files = new Set();
+  const styles = new Set();
+  const visit = (file) => {
+    if (files.has(file)) return;
+    const chunk = bundle[file];
+    // The HTML already loads its entry module and inlines its CSS. Do not
+    // reintroduce an external entry-CSS fetch via a map's shared imports.
+    if (chunk?.type !== "chunk" || chunk.isEntry) return;
+    files.add(file);
+    for (const css of chunk.viteMetadata?.importedCss || []) styles.add(css);
+    for (const dependency of chunk.imports) visit(dependency);
+  };
+  if (map) visit(map.fileName);
+  return [
+    ...[...files].map((file) => ({
+      href: assetUrl(file, base, htmlPath),
+      rel: "modulepreload",
+      as: "",
+    })),
+    ...[...styles].map((file) => ({
+      href: assetUrl(file, base, htmlPath),
+      rel: "preload",
+      as: "style",
+    })),
+  ];
+}
+
+const scriptJson = (value) => JSON.stringify(value).replaceAll("<", "\\u003c");
+
+async function startupScript(manifestUrl, assets, styleFactory, mapBounds) {
+  // Fetch the mutable manifest once with its existing revalidation policy. Its
+  // Response is consumed by load-files, so HTML warmup never pins a snapshot.
+  const code = `(() => {
+    globalThis.__gradesMapBounds = ${scriptJson(mapBounds)};
+    const url = new URL(${scriptJson(manifestUrl)}, document.baseURI).href;
+    if (globalThis.__gradesManifest?.url !== url) {
+      const response = fetch(url, {cache: "no-cache", signal: AbortSignal.timeout(60_000)});
+      response.catch(() => {});
+      globalThis.__gradesManifest = {url, response};
+    }
+    if (location.hash.split("?")[0] === "#/watchlist") return;
+    (${preloadBasemap.toString()})(${scriptJson(mapStyles)}, ${scriptJson(assets)}, undefined, ${styleFactory.toString()});
+  })();`;
+  const result = await transform(code, {
+    minify: true,
+    target: "es2022",
+    charset: "ascii",
+  });
+  return result.code.replace(/<\/script/gi, "<\\/script");
+}
+
 /** @returns {import("vite").Plugin} */
-export function startupResources() {
+export function startupResources({ styleFactory = createBasemapStyle } = {}) {
   let base = "./";
   let publicDirectory = "";
   let summaryFile = "";
+  let mapBounds;
   return {
     name: "startup-resources",
     apply: "build",
@@ -48,9 +121,7 @@ export function startupResources() {
       // runtime still validates its fresh manifest and owns snapshot selection.
       const directory = path.join(publicDirectory, "data");
       const manifest = validateManifest(
-        JSON.parse(
-          await readFile(path.join(directory, "manifest.json"), "utf8"),
-        ),
+        JSON.parse(await readFile(path.join(directory, MANIFEST_FILE), "utf8")),
       );
       const summary = await readFile(
         path.join(directory, manifest.summary.file),
@@ -64,10 +135,16 @@ export function startupResources() {
           "Cannot preload an incomplete or corrupted restaurant summary.",
         );
       summaryFile = `data/${manifest.summary.file}`;
+      mapBounds = {
+        summary: manifest.summary.file,
+        bounds: restaurantBounds(
+          validateSummary(JSON.parse(summary), manifest).restaurants,
+        ),
+      };
     },
     transformIndexHtml: {
       order: "post",
-      handler(html, context) {
+      async handler(html, context) {
         if (!context.bundle) return html;
         const htmlPath = context.path.replace(/^\//, "");
         const stylesheets = new Map(
@@ -94,8 +171,23 @@ export function startupResources() {
               : link;
           },
         );
+        const script = `<script data-startup-resources>${await startupScript(
+          assetUrl(`data/${MANIFEST_FILE}`, base, htmlPath),
+          mapAssets(context.bundle, base, htmlPath),
+          styleFactory,
+          mapBounds,
+        )}</script>`;
+        // Keep the character encoding declaration within the first 1024 bytes.
+        // Warmup still runs before the entry module without moving this metadata.
+        const charset = inlined.match(/<meta\b[^>]*\bcharset\s*=[^>]*>/i)?.[0];
+        const warmed = charset
+          ? inlined.replace(charset, () => `${charset}\n    ${script}`)
+          : inlined.replace(
+              /<head(?:\s[^>]*)?>/i,
+              (head) => `${head}\n    ${script}`,
+            );
         return {
-          html: inlined,
+          html: warmed,
           tags: [
             {
               tag: "link",

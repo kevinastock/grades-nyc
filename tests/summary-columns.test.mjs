@@ -102,6 +102,104 @@ test("an empty summary retains its complete column schema and decodes to no rest
   );
 });
 
+test("compact columns retain nulls, dictionary order and earlier-column references", () => {
+  const wire = wireSummary();
+  wire.restaurants.borough = { values: ["Queens", "Unknown"], indices: [1, 0] };
+  wire.restaurants.grade = { values: ["A", null], indices: [1, 0] };
+  wire.restaurants.grade_inspected = { ref: "grade_date" };
+  wire.restaurants.closed_date = { constant: null };
+  const before = structuredClone(wire);
+  assert.deepEqual(
+    validateSummary(wire, manifest).restaurants,
+    expectedRows.map((row) => ({
+      ...row,
+      grade_inspected: row.grade_date,
+      closed_date: null,
+    })),
+  );
+  assert.deepEqual(wire, before);
+});
+
+test("encoder compresses repeated values without changing IDs or restaurant objects", () => {
+  const rows = Array.from({ length: 100 }, (_, index) => {
+    const row = expectedRows[index % 2];
+    return {
+      ...row,
+      id: String(index).padStart(6, "0"),
+      grade_inspected: row.grade_date,
+      closure: "none",
+    };
+  });
+  const columns = encodeRestaurantColumns(rows);
+  assert.deepEqual(
+    columns.id,
+    rows.map((row) => row.id),
+  );
+  assert.deepEqual(columns.closure, { constant: "none" });
+  assert.deepEqual(columns.grade_inspected, { ref: "grade_date" });
+  assert.deepEqual(columns.borough.values, ["Unknown", "Queens"]);
+  assert.deepEqual(
+    columns.borough.indices,
+    rows.map((_, index) => index % 2),
+  );
+  assert.deepEqual(
+    validateSummary(
+      { ...wireSummary(), restaurants: columns },
+      { summary: { rows: rows.length } },
+    ).restaurants,
+    rows,
+  );
+});
+
+test("compact columns reject invalid dictionaries, unknown keys and unbounded references", () => {
+  for (const column of [
+    {},
+    { values: ["Queens"], indices: [0] },
+    { values: ["Queens"], indices: [0, 0, 0] },
+    { values: [], indices: [0, 0] },
+    { values: ["Queens", "Unknown", "Manhattan"], indices: [0, 1] },
+    { values: "Queens", indices: [0, 0] },
+    { values: ["Queens"], indices: "00" },
+    { values: ["Queens"], indices: [0, 1] },
+    { values: ["Queens"], indices: [0, -1] },
+    { values: ["Queens"], indices: [0, 0.5] },
+    { values: ["Queens"], indices: [0, "0"] },
+    { values: ["Queens"], indices: [0, Infinity] },
+    { values: ["Queens"], indices: [0, Number.MAX_SAFE_INTEGER + 1] },
+    { values: ["Queens", null], indices: [0, 0] },
+    { values: ["Queens"], indices: [0, 0], extra: true },
+    { constant: null },
+    { constant: "Queens", extra: true },
+    { ref: "borough" },
+    { ref: "cuisine" },
+    { ref: "__proto__" },
+    { ref: "constructor" },
+    { ref: "unknown" },
+    { ref: 0 },
+    { ref: "name", extra: true },
+  ]) {
+    const wire = wireSummary();
+    wire.restaurants.borough = column;
+    assert.throws(
+      () => validateSummary(wire, manifest),
+      /Invalid restaurant summary/,
+    );
+  }
+  const cycle = wireSummary();
+  cycle.restaurants.grade_date = { ref: "grade_inspected" };
+  cycle.restaurants.grade_inspected = { ref: "grade_date" };
+  assert.throws(
+    () => validateSummary(cycle, manifest),
+    /Invalid restaurant summary column reference/,
+  );
+  const ids = wireSummary();
+  ids.restaurants.id = { constant: "00123" };
+  assert.throws(
+    () => validateSummary(ids, manifest),
+    /Invalid restaurant summary/,
+  );
+});
+
 test("summary rejects missing, non-array and unequal-length columns before decoding", () => {
   for (const field of Object.keys(wireSummary().restaurants)) {
     for (const corrupt of [

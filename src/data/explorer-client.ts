@@ -1,4 +1,20 @@
-import type { Restaurant } from "./types";
+import type { Finding, Restaurant, Violation } from "./types";
+
+export type ExplorerData = { bytes: ArrayBuffer; manifest: unknown };
+type SummaryColumn<T> =
+  | T[]
+  | { constant: T }
+  | { values: T[]; indices: number[] }
+  | { ref: keyof Restaurant };
+export type SummaryColumns = {
+  restaurants: { id: string[] } & {
+    [K in Exclude<keyof Restaurant, "id">]: SummaryColumn<Restaurant[K]>;
+  };
+  definitions: Finding[];
+  violations: Violation[];
+  cuisines: string[];
+  boroughs: string[];
+};
 
 export type MapBounds = {
   west: number;
@@ -45,7 +61,10 @@ type Job = {
 
 export class ExplorerClient {
   private worker: Worker;
-  private ready: Promise<unknown>;
+  private ready: Promise<void>;
+  private resolveReady!: () => void;
+  private rejectReady!: (error: Error) => void;
+  private initializing = false;
   private sequence = 0;
   private stopped: Error | null = null;
   private pending = new Map<
@@ -55,7 +74,12 @@ export class ExplorerClient {
   private queued: Job | null = null;
   private running = false;
 
-  constructor(restaurants: Restaurant[]) {
+  constructor(restaurants?: Restaurant[], source?: ExplorerData) {
+    this.ready = new Promise((resolve, reject) => {
+      this.resolveReady = resolve;
+      this.rejectReady = reject;
+    });
+    void this.ready.catch(() => {});
     this.worker = new Worker(new URL("./explorer.worker.ts", import.meta.url), {
       type: "module",
     });
@@ -72,17 +96,50 @@ export class ExplorerClient {
       this.dispose(
         new Error("Restaurant search could not respond. Please retry."),
       );
-    this.ready = this.request("init", [restaurants]);
-    void this.ready.catch(() => {});
+    if (source)
+      void this.initialize(
+        "init-summary",
+        [source.bytes, source.manifest],
+        [source.bytes],
+      );
+    else if (restaurants) void this.initialize("init", [restaurants]);
   }
 
-  private request<T>(type: string, args: unknown[]): Promise<T> {
+  /** Prepare search once and return validated columns for the UI to expand. */
+  prepareSummary(source: ExplorerData): Promise<SummaryColumns> {
+    return this.initialize<SummaryColumns>(
+      "init-summary",
+      [source.bytes, source.manifest, true],
+      [source.bytes],
+    );
+  }
+
+  private initialize<T>(
+    type: string,
+    args: unknown[],
+    transfer: Transferable[] = [],
+  ): Promise<T> {
+    if (this.initializing)
+      return Promise.reject(
+        new Error("Restaurant search already initialized."),
+      );
+    this.initializing = true;
+    const request = this.request<T>(type, args, transfer);
+    void request.then(() => this.resolveReady(), this.rejectReady);
+    return request;
+  }
+
+  private request<T>(
+    type: string,
+    args: unknown[],
+    transfer: Transferable[] = [],
+  ): Promise<T> {
     if (this.stopped) return Promise.reject(this.stopped);
     return new Promise((resolve, reject) => {
       const id = ++this.sequence;
       this.pending.set(id, { resolve, reject });
       try {
-        this.worker.postMessage({ id, type, args });
+        this.worker.postMessage({ id, type, args }, transfer);
       } catch (error) {
         this.pending.delete(id);
         reject(error);
@@ -135,6 +192,7 @@ export class ExplorerClient {
     if (this.stopped) return;
     this.stopped = error;
     this.worker.terminate();
+    this.rejectReady(error);
     for (const request of this.pending.values()) request.reject(error);
     this.pending.clear();
     this.queued?.reject(error);

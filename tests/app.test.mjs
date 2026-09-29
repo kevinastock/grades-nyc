@@ -9,7 +9,11 @@ import { fileURLToPath } from "node:url";
 // (data, worker queries and MapLibre) is controlled so races are deterministic.
 const stubs = {
   "./data/client": `
+    import { ExplorerClient } from "./data/explorer-client";
     export const loadData = (...args) => globalThis.appTest.loadData(...args);
+    export const getExplorerData = () => undefined;
+    export const takeExplorer = (restaurants) => new ExplorerClient(restaurants);
+    export const disposePreparedExplorer = () => {};
     export const prefetchInspections = () => {};
     export const getInspections = async () => [];
   `,
@@ -19,6 +23,9 @@ const stubs = {
       query(...args) { return this.client.query(...args); }
       dispose() { this.client.dispose(); }
     }
+  `,
+  "./data/map-resources": `
+    export const preloadBasemap = () => globalThis.appTest.basemapWarmups++;
   `,
   "./components/RestaurantMap": `
     globalThis.appTest.mapImports++;
@@ -44,7 +51,7 @@ const bundled = await build({
         builder.onResolve(
           {
             filter:
-              /(?:data\/client|data\/explorer-client|components\/RestaurantMap)$/,
+              /(?:data\/client|data\/explorer-client|data\/map-resources|components\/RestaurantMap)$/,
           },
           (args) => {
             const id = args.path.replace(/^\.\.\//, "./");
@@ -97,8 +104,23 @@ function dataset(count = 90) {
   };
 }
 
-async function mount(t, hash = "#/search", selected = [], size = {}) {
+async function mount(
+  t,
+  hash = "#/search",
+  selected = [],
+  size = {},
+  { delayMapYield = false } = {},
+) {
   const window = new Window({ url: `http://localhost/${hash}`, ...size });
+  const mapYields = [];
+  window.scheduler = {
+    yield() {
+      if (!delayMapYield) return Promise.resolve();
+      const job = deferred();
+      mapYields.push(job);
+      return job.promise;
+    },
+  };
   // Happy DOM treats comma-separated media queries as AND and misses the first
   // true-to-false change. Keep its real query evaluation, with browser OR/change
   // semantics so portrait, landscape and live resizing exercise the app.
@@ -134,6 +156,7 @@ async function mount(t, hash = "#/search", selected = [], size = {}) {
   window.cancelAnimationFrame = (id) => frames.delete(id);
   window.appTest = {
     mapImports: 0,
+    basemapWarmups: 0,
     loadData(onProgress, restaurantId) {
       const job = { ...deferred(), onProgress, restaurantId };
       loads.push(job);
@@ -262,6 +285,7 @@ async function mount(t, hash = "#/search", selected = [], size = {}) {
     loads,
     clients,
     maps,
+    mapYields,
     flush,
     results,
     input,
@@ -308,36 +332,48 @@ test("watchlist startup defers the map renderer and basemap until search is open
   await h.resolveQuery(h.clients[0].jobs[0], ["1"]);
   assert.equal(h.window.appTest.mapImports, 0);
   assert.equal(h.maps.length, 0);
-  assert.equal(
-    h.window.document.head.querySelectorAll('link[rel="preload"]').length,
-    0,
-  );
+  assert.equal(h.window.appTest.basemapWarmups, 0);
 
   h.root.querySelector('nav [aria-label="Restaurants"]').click();
   await h.flush();
   assert.equal(h.window.appTest.mapImports, 1);
   assert.equal(h.maps.length, 1);
-  const hints = [
-    ...h.window.document.head.querySelectorAll('link[rel="preload"]'),
-  ];
-  assert.deepEqual(
-    hints.map((link) => link.href),
-    [
-      "https://tiles.openfreemap.org/styles/bright",
-      "https://tiles.openfreemap.org/planet",
-    ],
-  );
-  assert.ok(
-    hints.every(
-      (link) => link.as === "fetch" && link.crossOrigin === "anonymous",
-    ),
-  );
+  assert.ok(h.window.appTest.basemapWarmups > 0);
   h.root.querySelector('nav [aria-label="Restaurants"]').click();
   await h.flush();
-  assert.equal(
-    h.window.document.head.querySelectorAll('link[rel="preload"]').length,
-    2,
-  );
+  assert.equal(h.window.appTest.mapImports, 1);
+});
+
+test("search mounts a visible map before summary or query completion and retains it", async (t) => {
+  const h = await mount(t);
+  await h.flush();
+  const map = h.map();
+  assert.ok(map);
+  assert.equal(map.props.result, null);
+  assert.equal(map.props.explorer, null);
+  assert.equal(map.props.dataReady, false);
+  assert.equal(h.root.querySelector(".workspace").hidden, false);
+  assert.equal(h.clients.length, 0);
+  await h.boot(dataset(2));
+  assert.equal(h.map(), map);
+  assert.equal(map.destroyed, false);
+  assert.equal(map.props.dataReady, true);
+  assert.equal(map.props.restaurants.size, 2);
+  assert.equal(h.maps.length, 1);
+});
+
+test("leaving search before data destroys its early map and never mounts in watchlist", async (t) => {
+  const h = await mount(t);
+  await h.flush();
+  const early = h.map();
+  h.root.querySelector('a[href="#/watchlist"]').click();
+  await h.flush();
+  assert.equal(early.destroyed, true);
+  h.loads[0].resolve(dataset(2));
+  await h.flush();
+  await h.resolveQuery(h.clients[0].jobs[0], ["1", "2"]);
+  assert.equal(h.maps.length, 1);
+  assert.equal(h.root.querySelector(".search-page").hidden, true);
 });
 
 for (const [orientation, size] of [
@@ -352,12 +388,22 @@ for (const [orientation, size] of [
     const queryCount = h.clients[0].jobs.length;
     assert.equal(h.results().hidden, true);
     assert.equal(h.results().id, "restaurant-results");
+    assert.equal(
+      h.resultIds().length,
+      0,
+      "collapsed results do not build hidden cards",
+    );
     assert.equal(map.props.showResultsToggle, true);
     assert.equal(map.props.resultsVisible, false);
     assert.notEqual(h.window.document.activeElement, h.input());
 
     map.props.onToggleResults();
     assert.equal(h.results().hidden, false);
+    assert.equal(
+      h.resultIds().length,
+      40,
+      "opening results renders the first page",
+    );
     assert.equal(map.props.resultsVisible, true);
     map.props.onToggleResults();
     assert.equal(h.results().hidden, true);
@@ -649,7 +695,7 @@ test("failed data loads can retry and expose usable search results", async (t) =
   );
 });
 
-test("search retry replaces the failed worker and map without accepting its late response", async (t) => {
+test("search retry replaces the failed worker and keeps the map without accepting its late response", async (t) => {
   const h = await mount(t);
   await h.boot();
   const oldClient = h.clients[0];
@@ -661,7 +707,8 @@ test("search retry replaces the failed worker and map without accepting its late
   assert.equal(h.results().getAttribute("aria-busy"), "false");
   h.button("Retry search").click();
   assert.equal(oldClient.disposed, true);
-  assert.equal(oldMap.destroyed, true);
+  assert.equal(oldMap.destroyed, false);
+  assert.equal(h.map(), oldMap);
   const retry = h.clients.at(-1).jobs[0];
   assert.equal(retry.criteria.search, "retry me");
   await h.resolveQuery(retry, ["2"]);
@@ -715,4 +762,40 @@ test("one reset action clears active filters while preserving the query", async 
   h.root.querySelector('[aria-label="Clear restaurant search"]').click();
   assert.equal(h.input().value, "");
   assert.equal(h.clients.at(-1).jobs.at(-1).criteria.search, "");
+});
+
+test("map import yields before creating GL while retaining one pending import", async (t) => {
+  const h = await mount(t, "#/search", [], {}, { delayMapYield: true });
+  await h.flush();
+  assert.equal(h.window.appTest.mapImports, 1);
+  assert.equal(h.mapYields.length, 1);
+  assert.equal(h.maps.length, 0);
+  h.mapYields[0].resolve();
+  await h.flush();
+  assert.equal(h.maps.length, 1);
+  assert.equal(h.map().props.dataReady, false);
+});
+
+test("leaving search during map yield caches the module without mounting in watchlist", async (t) => {
+  const h = await mount(t, "#/search", [], {}, { delayMapYield: true });
+  await h.flush();
+  h.root.querySelector('a[href="#/watchlist"]').click();
+  h.mapYields[0].resolve();
+  await h.flush();
+  assert.equal(h.maps.length, 0);
+  h.root.querySelector('nav [aria-label="Restaurants"]').click();
+  await h.flush();
+  assert.equal(h.maps.length, 1);
+  assert.equal(h.window.appTest.mapImports, 1);
+  assert.equal(h.mapYields.length, 1);
+});
+
+test("disposing while map import yields prevents late construction", async (t) => {
+  const h = await mount(t, "#/search", [], {}, { delayMapYield: true });
+  await h.flush();
+  h.app.destroy();
+  h.mapYields[0].resolve();
+  await h.flush();
+  assert.equal(h.maps.length, 0);
+  assert.equal(h.root.childElementCount, 0);
 });

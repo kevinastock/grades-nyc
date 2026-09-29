@@ -4,7 +4,6 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { Window } from "happy-dom";
-import { createExpression, latest } from "@maplibre/maplibre-gl-style-spec";
 
 const project = fileURLToPath(new URL("..", import.meta.url));
 const bundle = await build({
@@ -40,11 +39,18 @@ const bundle = await build({
           path: "client",
           namespace: "stub",
         }));
+        b.onResolve({ filter: /^\.\.\/data\/map-resources$/ }, () => ({
+          path: "map-resources",
+          namespace: "stub",
+        }));
         b.onLoad({ filter: /.*/, namespace: "stub" }, ({ path }) => ({
           contents:
             path === "worker"
               ? 'export default "/assets/maplibre-worker.mjs";'
-              : "export const prefetchInspections = () => {};",
+              : path === "map-resources"
+                ? `export const mapStyles = {light: "light", dark: "dark"};
+                  export const loadBasemapStyle = (url) => globalThis.__loadBasemapStyle(url);`
+                : "export const prefetchInspections = () => {};",
         }));
       },
     },
@@ -56,9 +62,22 @@ const bundle = await build({
 async function harness(
   t,
   overrides = {},
-  { hidden = false, dark = false } = {},
+  { hidden = false, dark = false, delayedStyles = false, startupBounds } = {},
 ) {
   const w = new Window({ url: "http://localhost/" });
+  if (startupBounds)
+    w.__gradesMapBounds = {
+      summary: `summary-${"a".repeat(64)}.json`,
+      bounds: startupBounds,
+    };
+  const styles = [];
+  w.__loadBasemapStyle = (url) => {
+    const value = { version: 8, name: url, sources: {}, layers: [] };
+    if (!delayedStyles) return Promise.resolve(value);
+    return new Promise((resolve, reject) =>
+      styles.push({ url, value, resolve, reject }),
+    );
+  };
   const frames = new Map();
   let frameId = 0;
   w.requestAnimationFrame = (callback) => {
@@ -137,7 +156,8 @@ async function harness(
   const selections = [];
   const host = w.document.createElement("main");
   w.document.body.append(host);
-  const props = {
+  const readyProps = {
+    dataReady: true,
     explorer: {
       viewport(revision, bounds, zoom) {
         return new Promise((resolve, reject) =>
@@ -145,8 +165,8 @@ async function harness(
         );
       },
       expand(revision, id) {
-        return new Promise((resolve) =>
-          expansions.push({ revision, id, resolve }),
+        return new Promise((resolve, reject) =>
+          expansions.push({ revision, id, resolve, reject }),
         );
       },
     },
@@ -172,8 +192,8 @@ async function harness(
     onError(error) {
       errors.push(error);
     },
-    ...overrides,
   };
+  const props = { ...readyProps, ...overrides };
   const view = createRestaurantMap(host, props);
   t.after(async () => {
     view.destroy();
@@ -250,18 +270,23 @@ async function harness(
         ]);
     await frame();
   }
-  function setDark(value) {
+  async function setDark(value) {
     media.matches = value;
     for (const callback of [...mediaListeners])
       callback({ matches: value, media: media.media });
+    await Promise.resolve();
   }
   await frame();
   const map = GLMap.instances.at(-1);
-  assert.equal(requests.length, hidden ? 0 : 1);
+  assert.equal(
+    requests.length,
+    hidden || !props.explorer || !props.result ? 0 : 1,
+  );
   return {
     host,
     view,
     props,
+    readyProps,
     map,
     requests,
     accepted,
@@ -283,6 +308,7 @@ async function harness(
     workerUrls,
     expansions,
     Popup,
+    styles,
     geometryReads: () => geometryReads,
   };
 }
@@ -409,20 +435,14 @@ test("changing the system theme replaces only the style and preserves camera and
   const markers = h.markers();
   assert.ok(selected.querySelector('[aria-pressed="true"]'));
   assert.ok(selected.querySelector(".map-selected-tooltip"));
-  assert.equal(
-    h.map.styles.at(-1),
-    "https://tiles.openfreemap.org/styles/bright",
-  );
+  assert.equal(h.map.styles.at(-1).name, "light");
   assert.equal(
     h.host.querySelectorAll(".map-restaurant").length,
     1,
     "selection is not duplicated as an ordinary marker",
   );
-  h.setDark(true);
-  assert.equal(
-    h.map.styles.at(-1),
-    "https://tiles.openfreemap.org/styles/fiord",
-  );
+  await h.setDark(true);
+  assert.equal(h.map.styles.at(-1).name, "dark");
   assert.deepEqual(h.map.getCenter(), camera);
   assert.equal(h.map.getZoom(), zoom);
   assert.deepEqual(h.markers(), markers);
@@ -434,95 +454,48 @@ test("changing the system theme replaces only the style and preserves camera and
   );
   selected.querySelector("button").click();
   assert.deepEqual(h.selections, ["central"]);
-  h.setDark(false);
-  assert.equal(
-    h.map.styles.at(-1),
-    "https://tiles.openfreemap.org/styles/bright",
-  );
+  await h.setDark(false);
+  assert.equal(h.map.styles.at(-1).name, "light");
 });
 
-test("a dark initial preference starts with Fiord", async (t) => {
+test("a dark initial preference starts with the dark local style", async (t) => {
   const h = await harness(t, {}, { dark: true });
-  assert.equal(
-    h.map.styles.at(-1),
-    "https://tiles.openfreemap.org/styles/fiord",
-  );
+  assert.equal(h.map.styles.at(-1).name, "dark");
 });
 
-test("POI sprites retain available icons and use a circle for missing icons without changing other layers", async (t) => {
-  const h = await harness(t);
-  const icon = ["get", "class"];
-  const poi = {
-    id: "poi-level-1",
-    type: "symbol",
-    source: "openmaptiles",
-    layout: {
-      "icon-image": icon,
-      "text-field": ["get", "name"],
-      "text-size": 12,
-    },
-  };
-  const road = {
-    id: "road-label",
-    type: "symbol",
-    layout: { "icon-image": ["get", "shield"] },
-  };
-  const fixedPoi = {
-    id: "poi-fixed",
-    type: "symbol",
-    layout: { "icon-image": "cafe" },
-  };
-  const background = { id: "background", type: "background" };
-  const original = {
-    version: 8,
-    sources: { openmaptiles: {} },
-    sprite: "https://example.com/sprite",
-    layers: [poi, road, fixedPoi, background],
-  };
-  const transformed = h.map.styleOptions
-    .at(-1)
-    .transformStyle(undefined, original);
-  assert.equal(transformed.sources, original.sources);
-  assert.equal(transformed.sprite, original.sprite);
-  assert.equal(transformed.layers[1], road);
-  assert.equal(transformed.layers[2], fixedPoi);
-  assert.equal(transformed.layers[3], background);
-  assert.equal(
-    poi.layout["icon-image"],
-    icon,
-    "the source style stays untouched",
+test("an old theme response or a destroyed map cannot replace the current style", async (t) => {
+  const h = await harness(t, {}, { delayedStyles: true });
+  assert.equal(h.styles.length, 1);
+  await h.setDark(true);
+  const [light, dark] = h.styles;
+  dark.resolve(dark.value);
+  await Promise.resolve();
+  assert.equal(h.map.styles.at(-1).name, dark.url);
+  light.resolve(light.value);
+  await Promise.resolve();
+  assert.equal(h.map.styles.length, 1);
+  await h.setDark(false);
+  h.view.destroy();
+  h.styles.at(-1).resolve(light.value);
+  await Promise.resolve();
+  assert.equal(h.map.styles.length, 1);
+});
+
+test("a failed shared style is reported without destroying the map and can retry", async (t) => {
+  const h = await harness(t, {}, { delayedStyles: true });
+  h.styles[0].reject(new Error("Offline"));
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.match(
+    h.host.querySelector(".map-message").textContent,
+    /Map tiles unavailable/,
   );
-  assert.equal(
-    transformed.layers[0].layout["text-field"],
-    poi.layout["text-field"],
-  );
-  assert.equal(transformed.layers[0].layout["text-size"], 12);
-  const parsed = createExpression(
-    transformed.layers[0].layout["icon-image"],
-    "icon-image",
-    latest.layout_symbol["icon-image"],
-  );
-  assert.equal(
-    parsed.result,
-    "success",
-    "the fallback is a valid MapLibre icon expression",
-  );
-  const evaluate = (kind, images) =>
-    parsed.value.evaluateWithoutErrorHandling(
-      { zoom: 14 },
-      { type: "Point", properties: { class: kind } },
-      undefined,
-      undefined,
-      images,
-    );
-  assert.equal(
-    evaluate("cafe", ["cafe", "circle"]).name,
-    "cafe",
-    "an available POI icon keeps its original sprite",
-  );
-  const fallback = evaluate("missing-poi-class", ["cafe", "circle"]);
-  assert.equal(fallback.name, "circle");
-  assert.equal(fallback.available, true);
+  await h.setDark(false);
+  assert.equal(h.styles.length, 2);
+  h.styles[1].resolve(h.styles[1].value);
+  await Promise.resolve();
+  assert.equal(h.map.styles.length, 1);
+  assert.equal(h.host.querySelector(".map-message").hidden, true);
 });
 
 test("hidden mounts defer viewport requests until measurable and preserve the camera after hiding", async (t) => {
@@ -589,7 +562,7 @@ test("destroy disconnects observers, theme listeners and pending viewport work",
   assert.equal(h.frames.size, 0);
   assert.equal(h.host.children.length, 0);
   await h.reply(pending, ["central", "nearby"]);
-  h.setDark(true);
+  await h.setDark(true);
   await h.resize(900, 600);
   h.view.update({ ...h.props, selectedId: "nearby" });
   assert.equal(h.accepted.length, 0);
@@ -635,6 +608,25 @@ const cluster = {
   geometry: { type: "Point", coordinates: [-73.97, 40.74] },
   properties: { cluster: true, cluster_id: 42, point_count: 2 },
 };
+
+test("a replaced worker's rejected cluster expansion cannot reopen a search error", async (t) => {
+  const h = await harness(t);
+  await h.replyFeatures(h.requests[0], [cluster]);
+  h.host.querySelector(".map-cluster button").click();
+  const expansion = h.expansions[0];
+  h.view.update({ ...h.props, explorer: null, result: null });
+  const replacement = { ...h.props.explorer };
+  h.view.update({
+    ...h.props,
+    explorer: replacement,
+    result: { ...h.props.result, revision: 2 },
+  });
+  await h.frame();
+  expansion.reject(new Error("Search worker stopped"));
+  await h.frame();
+  assert.equal(h.errors.length, 0);
+  assert.equal(h.map.removed, false);
+});
 
 test("cluster expansion reaches maximum navigable zoom and ignores replies after a newer interaction", async (t) => {
   const h = await harness(t);
@@ -712,4 +704,212 @@ test("basemap failures show an alert which clears after the replacement style lo
   assert.equal(status.textContent, "Map tiles unavailable.");
   h.map.fire("style.load");
   assert.equal(status.hidden, true);
+});
+
+test("map starts at the published city bounds before data and keeps its context when pins arrive", async (t) => {
+  const bounds = [-74.24, 40.5, -73.7, 40.91];
+  const h = await harness(
+    t,
+    {
+      explorer: null,
+      result: null,
+      dataReady: false,
+      restaurants: new Map(),
+      cameraRequest: { key: "search", view: null },
+    },
+    { startupBounds: bounds },
+  );
+  const canvas = h.map.getCanvas();
+  const camera = { center: h.map.getCenter(), zoom: h.map.getZoom() };
+  const expected = h.map.cameraForBounds(bounds, { padding: 35, maxZoom: 15 });
+  assert.deepEqual(camera.center, expected.center);
+  assert.equal(camera.zoom, expected.zoom);
+  assert.equal(h.map.styles.length, 1);
+  assert.equal(h.host.querySelector('[role="alert"]').hidden, true);
+  assert.equal(
+    h.cameras.length,
+    0,
+    "the provisional camera must not rewrite history",
+  );
+  h.view.update({ ...h.readyProps, cameraRequest: h.props.cameraRequest });
+  await h.frame();
+  assert.equal(h.map.getCanvas(), canvas);
+  assert.equal(h.map.removed, false);
+  assert.equal(h.map.styles.length, 1);
+  assert.deepEqual(h.map.getCenter(), camera.center);
+  assert.equal(h.map.getZoom(), camera.zoom);
+  await h.reply(h.requests.at(-1), ["central"]);
+  const pin = h.host.querySelector(".map-restaurant button");
+  assert.equal(pin.type, "button");
+  assert.match(pin.getAttribute("aria-label"), /Central.*Grade A/);
+  pin.focus();
+  assert.equal(pin.ownerDocument.activeElement, pin);
+  pin.click();
+  assert.deepEqual(h.selections, ["central"]);
+});
+
+test("loading data and a narrower snapshot never reset a camera moved during startup", async (t) => {
+  const h = await harness(t, {
+    explorer: null,
+    result: null,
+    dataReady: false,
+    restaurants: new Map(),
+    cameraRequest: { key: "search", view: null },
+  });
+  h.map.jumpTo({ center: [-73.91, 40.78], zoom: 12 });
+  const center = h.map.getCenter();
+  h.view.update({
+    ...h.readyProps,
+    cameraRequest: h.props.cameraRequest,
+    restaurants: new Map([
+      ["central", h.readyProps.restaurants.get("central")],
+    ]),
+  });
+  await h.frame();
+  assert.deepEqual(h.map.getCenter(), center);
+  assert.equal(h.map.getZoom(), 12);
+  assert.equal(h.map.removed, false);
+});
+
+test("a camera moved before data is reported and survives an early map remount", async (t) => {
+  const loading = {
+    explorer: null,
+    result: null,
+    dataReady: false,
+    restaurants: new Map(),
+    cameraRequest: { key: "search", view: null },
+  };
+  const h = await harness(t, loading);
+  await h.frame();
+  assert.equal(
+    h.cameras.length,
+    0,
+    "the synthetic startup fit stays provisional",
+  );
+  h.map.jumpTo({ center: [-73.91, 40.78], zoom: 12 });
+  await h.frame();
+  assert.equal(
+    h.requests.length,
+    0,
+    "camera persistence does not need a search worker",
+  );
+  assert.equal(h.cameras.length, 1);
+  const saved = h.cameras[0].camera;
+  assert.equal(saved.lat, 40.78);
+  assert.equal(saved.lon, -73.91);
+  assert.equal(saved.zoom, 13, "history retains the app's original zoom scale");
+  h.view.destroy();
+
+  const restored = await harness(t, {
+    ...loading,
+    cameraRequest: { key: "returned-search", view: saved },
+  });
+  assert.equal(restored.map.getCenter().lat, saved.lat);
+  assert.equal(restored.map.getCenter().lng, saved.lon);
+  assert.equal(restored.map.getZoom(), 12);
+  assert.equal(
+    restored.cameras.length,
+    0,
+    "restoring a saved camera is not a new user movement",
+  );
+  restored.view.update({
+    ...restored.readyProps,
+    cameraRequest: restored.props.cameraRequest,
+  });
+  await restored.frame();
+  assert.equal(restored.map.getCenter().lat, saved.lat);
+  assert.equal(restored.map.getCenter().lng, saved.lon);
+  assert.equal(restored.map.getZoom(), 12);
+});
+
+test("a selected deep link waits for its real location before requesting the basemap", async (t) => {
+  const h = await harness(t, {
+    explorer: null,
+    result: null,
+    dataReady: false,
+    restaurants: new Map(),
+    selectedId: "central",
+    cameraRequest: { key: "detail", view: null },
+  });
+  assert.equal(h.map.styles.length, 0);
+  h.view.update({
+    ...h.readyProps,
+    selectedId: "central",
+    cameraRequest: h.props.cameraRequest,
+  });
+  await h.frame();
+  assert.equal(h.map.getCenter().lng, -73.97);
+  assert.equal(h.map.getCenter().lat, 40.74);
+  assert.equal(h.map.getZoom(), 16);
+  assert.equal(h.map.styles.length, 1);
+  assert.equal(h.map.removed, false);
+  assert.ok(h.host.querySelector('.map-selected button[aria-pressed="true"]'));
+});
+
+test("saved cameras apply before records arrive and are never replaced by their selection", async (t) => {
+  const cameraRequest = {
+    key: "saved",
+    view: { lat: 40.8, lon: -73.9, zoom: 14 },
+  };
+  const h = await harness(t, {
+    explorer: null,
+    result: null,
+    dataReady: false,
+    restaurants: new Map(),
+    selectedId: "central",
+    cameraRequest,
+  });
+  const center = h.map.getCenter();
+  assert.equal(h.map.getZoom(), 13);
+  assert.equal(h.map.styles.length, 1);
+  h.view.update({ ...h.readyProps, selectedId: "central", cameraRequest });
+  await h.frame();
+  assert.deepEqual(h.map.getCenter(), center);
+  assert.equal(h.map.getZoom(), 13);
+  assert.equal(h.map.removed, false);
+});
+
+test("filtered startup waits for query bounds and ignores a disposed worker's viewport", async (t) => {
+  const h = await harness(t, {
+    result: null,
+    fitToResults: true,
+    cameraRequest: { key: "filtered", view: null },
+  });
+  assert.equal(h.map.styles.length, 0);
+  const ready = {
+    ...h.readyProps,
+    fitToResults: true,
+    cameraRequest: h.props.cameraRequest,
+    result: {
+      ...h.readyProps.result,
+      bounds: { west: -73.97, east: -73.97, south: 40.74, north: 40.74 },
+    },
+  };
+  h.view.update(ready);
+  await h.frame();
+  assert.equal(h.map.getCenter().lng, -73.97);
+  assert.equal(h.map.getZoom(), 15);
+  assert.equal(h.map.styles.length, 1);
+  const stale = h.requests.at(-1);
+  h.view.update({ ...ready, explorer: null, result: null });
+  await h.reply(stale, ["central"]);
+  assert.equal(h.accepted.length, 0);
+  assert.equal(h.map.removed, false);
+});
+
+test("a fast query reply cannot bypass the layout frames of a pending camera navigation", async (t) => {
+  const h = await harness(t);
+  const center = h.map.getCenter();
+  h.view.update({
+    ...h.props,
+    selectedId: "northeast",
+    cameraRequest: { key: "detail", view: null },
+    result: { ...h.props.result, revision: 2 },
+  });
+  assert.deepEqual(h.map.getCenter(), center);
+  await h.frame();
+  assert.deepEqual(h.map.getCenter(), center);
+  await h.frame();
+  assert.equal(h.map.getCenter().lng, -73.7);
+  assert.equal(h.map.getCenter().lat, 40.91);
 });

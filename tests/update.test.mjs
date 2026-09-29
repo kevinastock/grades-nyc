@@ -15,6 +15,11 @@ import { spawnSync } from "node:child_process";
 import { convertData } from "../scripts/convert-data.mjs";
 import { prepareData } from "../scripts/prepare-data.mjs";
 import {
+  MANIFEST_FILE,
+  LEGACY_MANIFEST_FILE,
+  LEGACY_SCHEMA_VERSION,
+  SUMMARY_FIELDS,
+  validateManifest,
   snapshotAssets,
   detailBucket,
   decodeInspections,
@@ -99,22 +104,29 @@ async function readJson(directory, file) {
   return JSON.parse(await readFile(path.join(directory, file), "utf8"));
 }
 async function snapshotBytes(directory) {
-  const manifest = await readJson(directory, "manifest.json");
+  const manifest = await readJson(directory, MANIFEST_FILE);
+  const legacy = await readJson(directory, LEGACY_MANIFEST_FILE);
+  const files = new Set([
+    MANIFEST_FILE,
+    LEGACY_MANIFEST_FILE,
+    ...snapshotAssets(manifest).map((asset) => asset.file),
+    legacy.summary.file,
+  ]);
   return Object.fromEntries(
     await Promise.all(
-      ["manifest.json", ...snapshotAssets(manifest).map((a) => a.file)].map(
-        async (file) => [
-          file,
-          hash(await readFile(path.join(directory, file))),
-        ],
-      ),
+      [...files].map(async (file) => [
+        file,
+        hash(await readFile(path.join(directory, file))),
+      ]),
     ),
   );
 }
+
 async function snapshot(directory, manifest) {
   const wire = await readJson(directory, manifest.summary.file);
   assert.ok(!Array.isArray(wire.restaurants));
-  assert.ok(Object.values(wire.restaurants).every(Array.isArray));
+  assert.ok(Array.isArray(wire.restaurants.id));
+  assert.equal(wire.restaurants.id.length, manifest.summary.rows);
   const summary = validateSummary(wire, manifest);
   return {
     ...summary,
@@ -416,6 +428,18 @@ test("a valid source containing only closed restaurants publishes an empty datas
     assert.equal(manifest.rowCount, 2);
     assert.equal(manifest.snapshot, "2026-09-26");
     assert.equal(manifest.summary.rows, 0);
+    const legacy = await readJson(output, LEGACY_MANIFEST_FILE);
+    assert.equal(
+      legacy.summary.file,
+      manifest.summary.file,
+      "empty formats share one immutable summary",
+    );
+    const publicData = path.join(directory, "public/data");
+    await prepareData(output, publicData, { prune: true });
+    assert.equal(
+      (await readdir(publicData)).length,
+      snapshotAssets(manifest).length + 2,
+    );
     for (const key of [
       "restaurants",
       "violations",
@@ -441,7 +465,10 @@ test("prepare validates every hash before publication and prunes stale JSON asse
     await prepareData(output, publicData);
     assert.equal(
       (await readdir(publicData)).length,
-      snapshotAssets(manifest).length + 1,
+      new Set([
+        ...snapshotAssets(manifest).map((asset) => asset.file),
+        (await readJson(output, LEGACY_MANIFEST_FILE)).summary.file,
+      ]).size + 2,
     );
     const obsolete = `details-00-${"0".repeat(64)}.json`;
     await writeFile(path.join(publicData, obsolete), "{}");
@@ -449,6 +476,9 @@ test("prepare validates every hash before publication and prunes stale JSON asse
     assert.ok((await readdir(publicData)).includes(obsolete));
     await prepareData(output, publicData, { prune: true });
     assert.ok(!(await readdir(publicData)).includes(obsolete));
+    const legacy = await readJson(output, LEGACY_MANIFEST_FILE);
+    assert.ok((await readdir(publicData)).includes(manifest.summary.file));
+    assert.ok((await readdir(publicData)).includes(legacy.summary.file));
     const before = await snapshotBytes(publicData),
       file = path.join(output, manifest.details[0].file),
       bytes = await readFile(file);
@@ -456,4 +486,184 @@ test("prepare validates every hash before publication and prunes stale JSON asse
     await writeFile(file, bytes);
     await assert.rejects(prepareData(output, publicData), /corrupted/);
     assert.deepEqual(await snapshotBytes(publicData), before);
+  }));
+
+test("conversion publishes schema-4 and released schema-3 columns for the same snapshot", async () =>
+  withDirectory(async (directory) => {
+    const input = path.join(directory, "migration.csv"),
+      output = path.join(directory, "data");
+    await writeFile(
+      input,
+      fixture([
+        {
+          ...basic,
+          CAMIS: "00123",
+          Latitude: "40.71278371",
+          Longitude: "-74.00594059",
+        },
+        {
+          ...basic,
+          CAMIS: "123",
+          DBA: "A Diner",
+          ZIPCODE: "00123",
+          Latitude: "",
+          Longitude: "",
+        },
+        {
+          ...basic,
+          CAMIS: "__proto__",
+          DBA: "Another Diner",
+          "GRADE DATE": "",
+          GRADE: "",
+        },
+      ]),
+    );
+    const current = await convertData(input, output);
+    assert.deepEqual(
+      await readJson(output, MANIFEST_FILE),
+      current,
+      "API returns the current manifest",
+    );
+    const legacy = validateManifest(
+      await readJson(output, LEGACY_MANIFEST_FILE),
+      LEGACY_SCHEMA_VERSION,
+    );
+    assert.throws(
+      () => validateManifest(legacy),
+      /Unsupported/,
+      "new clients require their versioned manifest",
+    );
+    assert.equal(legacy.schemaVersion, 3);
+    assert.equal(LEGACY_MANIFEST_FILE, "manifest.json");
+    assert.equal(MANIFEST_FILE, "manifest-v4.json");
+    assert.equal(legacy.snapshot, current.snapshot);
+    assert.equal(legacy.rowCount, current.rowCount);
+    assert.deepEqual(
+      legacy.details,
+      current.details,
+      "histories are shared without renumbering definitions",
+    );
+    const compact = await readJson(output, current.summary.file);
+    const plain = await readJson(output, legacy.summary.file);
+    assert.deepEqual(Object.keys(plain.restaurants), SUMMARY_FIELDS);
+    const decoded = validateSummary(compact, current);
+    for (const field of SUMMARY_FIELDS) {
+      assert.ok(
+        Array.isArray(plain.restaurants[field]),
+        `released schema-3 column ${field} remains an array`,
+      );
+      assert.deepEqual(
+        plain.restaurants[field],
+        decoded.restaurants.map((row) => row[field]),
+        field,
+      );
+    }
+    assert.ok(
+      Object.values(compact.restaurants).some(
+        (column) => !Array.isArray(column),
+      ),
+    );
+    assert.deepEqual(validateSummary(plain, legacy), decoded);
+    assert.ok(plain.restaurants.id.includes("00123"));
+    assert.ok(plain.restaurants.id.includes("123"));
+    assert.ok(plain.restaurants.id.includes("__proto__"));
+    assert.ok(plain.restaurants.zip.includes("00123"));
+    assert.ok(plain.restaurants.lat.includes(null));
+    assert.ok(plain.restaurants.grade.includes(null));
+  }));
+
+test("prepare rejects incomplete or mismatched legacy output before changing either publication", async () =>
+  withDirectory(async (directory) => {
+    const input = path.join(directory, "source.csv"),
+      output = path.join(directory, "data"),
+      publicData = path.join(directory, "public/data");
+    await writeFile(input, fixture());
+    const current = await convertData(input, output);
+    await prepareData(output, publicData);
+    const before = await snapshotBytes(publicData);
+    const legacyPath = path.join(output, LEGACY_MANIFEST_FILE);
+    const legacyBytes = await readFile(legacyPath);
+    const legacy = JSON.parse(legacyBytes);
+    const plain = await readJson(output, legacy.summary.file);
+    const unchanged = async () =>
+      assert.deepEqual(await snapshotBytes(publicData), before);
+    const restore = () => writeFile(legacyPath, legacyBytes);
+
+    await rm(legacyPath);
+    await assert.rejects(
+      prepareData(output, publicData, { prune: true }),
+      /complete JSON publication/,
+    );
+    await unchanged();
+    await restore();
+
+    await writeFile(
+      legacyPath,
+      JSON.stringify({ ...legacy, snapshot: "2026-01-01" }),
+    );
+    await assert.rejects(
+      prepareData(output, publicData, { prune: true }),
+      /same snapshot/,
+    );
+    await unchanged();
+    await restore();
+
+    const inconsistentHistory = structuredClone(legacy);
+    inconsistentHistory.details[0].rows++;
+    await writeFile(legacyPath, JSON.stringify(inconsistentHistory));
+    await assert.rejects(
+      prepareData(output, publicData, { prune: true }),
+      /same snapshot/,
+    );
+    await unchanged();
+    await restore();
+
+    const legacyFile = path.join(output, legacy.summary.file);
+    const original = await readFile(legacyFile);
+    await writeFile(legacyFile, Buffer.from("corrupted"));
+    await assert.rejects(
+      prepareData(output, publicData, { prune: true }),
+      /corrupted/,
+    );
+    await unchanged();
+    await writeFile(legacyFile, original);
+
+    for (const [edit, expected] of [
+      [
+        (wire) => {
+          wire.restaurants.closure = { constant: "none" };
+        },
+        /plain columns/,
+      ],
+      [
+        (wire) => {
+          wire.restaurants.name[0] = "Different restaurant";
+        },
+        /same snapshot/,
+      ],
+    ]) {
+      const wire = structuredClone(plain);
+      edit(wire);
+      const bytes = Buffer.from(JSON.stringify(wire));
+      const file = `summary-${hash(bytes)}.json`;
+      await writeFile(path.join(output, file), bytes);
+      await writeFile(
+        legacyPath,
+        JSON.stringify({
+          ...legacy,
+          summary: { ...legacy.summary, file, bytes: bytes.length },
+        }),
+      );
+      await assert.rejects(
+        prepareData(output, publicData, { prune: true }),
+        expected,
+      );
+      await unchanged();
+      await restore();
+    }
+    assert.deepEqual(
+      await prepareData(output, publicData, { prune: true }),
+      current,
+    );
+    await unchanged();
   }));
