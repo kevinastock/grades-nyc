@@ -4,7 +4,7 @@ import {
   rankRestaurantSearch,
 } from "./search.mjs";
 import { hasCoordinates } from "./model.mjs";
-import { inMapBounds, locatedFirst } from "./map.mjs";
+import { inMapBounds, locatedFirst, MAX_MAP_ZOOM } from "./map.mjs";
 
 /** All dataset-wide interactive work stays here, outside the browser UI thread. */
 export function createExplorer(restaurants) {
@@ -55,7 +55,13 @@ export function createExplorer(restaurants) {
         );
       } else filteredScores = [];
       const points = filtered.filter(hasCoordinates);
-      cluster = new Supercluster({ radius: 48, extent: 256, maxZoom: 19 });
+      // A 24px radius keeps adjacent 28px restaurant pins separate sooner.
+      // Continue clustering at the closest zoom so coincident pins stay selectable.
+      cluster = new Supercluster({
+        radius: 24,
+        extent: 256,
+        maxZoom: MAX_MAP_ZOOM,
+      });
       cluster.load(
         points.map((r) => ({
           type: "Feature",
@@ -113,7 +119,7 @@ export function createExplorer(restaurants) {
         revision,
         zoom,
         ids:
-          zoom > 17
+          zoom > MAX_MAP_ZOOM
             ? cluster
                 .getLeaves(clusterId, Infinity)
                 .map((point) => point.properties.id)

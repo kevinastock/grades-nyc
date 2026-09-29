@@ -1,5 +1,14 @@
-import L from "leaflet";
-import "leaflet/dist/leaflet.css";
+import {
+  Map as GLMap,
+  Marker,
+  Popup,
+  NavigationControl,
+  LngLatBounds,
+  MercatorCoordinate,
+  setWorkerUrl,
+} from "maplibre-gl";
+import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
+import "maplibre-gl/dist/maplibre-gl.css";
 import "./map.css";
 import type { Restaurant } from "../data/types";
 import {
@@ -10,8 +19,21 @@ import {
 } from "../data/explorer-client";
 import { prefetchInspections } from "../data/client";
 import { hasCoordinates } from "../data/model.mjs";
+import { MAX_MAP_ZOOM } from "../data/map.mjs";
 import { titleCase } from "../data/presentation.mjs";
 import { gradeImage, icon } from "./shared";
+
+// Bundle the module worker with Vite so relative-path static deployments work.
+setWorkerUrl(workerUrl);
+
+const mapStyles = {
+  light: "https://tiles.openfreemap.org/styles/bright",
+  dark: "https://tiles.openfreemap.org/styles/fiord",
+};
+// Navigation history and the clustering worker use a 256px world at zoom 0.
+// MapLibre uses 512px, so convert only at the renderer boundary.
+const toMapZoom = (zoom: number) => zoom - 1;
+const fromMapZoom = (zoom: number) => zoom + 1;
 
 const clusterCountFormat = new Intl.NumberFormat("en", {
   notation: "compact",
@@ -39,7 +61,7 @@ export type MapProps = {
   onError: (error: Error) => void;
 };
 
-/** Mount one map; update its inputs without replacing Leaflet or its DOM. */
+/** Mount one map; update its inputs without replacing MapLibre or its DOM. */
 export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
   let props = initial;
   let destroyed = false;
@@ -85,91 +107,118 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
 
   function mountMap() {
     const { explorer, restaurants } = props;
-    // No default view or tiles: fit the actual data before starting tile requests.
-    const map = L.map(element, {
-      maxZoom: 19,
-      maxBoundsViscosity: 1,
-      bounceAtZoomLimits: false,
-      // ResizeObserver handles sizing and can ignore hidden containers.
-      trackResize: false,
-    });
-    const zoomControls = map.zoomControl.getContainer();
-    zoomControls
-      ?.querySelector(".leaflet-control-zoom-in")
-      ?.replaceChildren(icon("plus"));
-    zoomControls
-      ?.querySelector(".leaflet-control-zoom-out")
-      ?.replaceChildren(icon("minus"));
-    map.on("popupopen", (event: L.PopupEvent) => {
-      event.popup
-        .getElement()
-        ?.querySelector(".leaflet-popup-close-button")
-        ?.replaceChildren(icon("x"));
-    });
     // Search results must not change the citywide navigation limits.
-    const cityBounds = L.latLngBounds(
-      [...restaurants.values()]
-        .filter(hasCoordinates)
-        .map((r) => [r.lat!, r.lon!] as L.LatLngTuple),
-    );
-    if (!cityBounds.isValid())
-      cityBounds.extend([40.4995, -74.2492]).extend([40.9129, -73.7009]);
-    // Leave room to reach edge restaurants without clipping their markers.
-    const navigationBounds = cityBounds.pad(0.05);
+    const cityBounds = new LngLatBounds();
+    for (const restaurant of restaurants.values()) {
+      if (hasCoordinates(restaurant))
+        cityBounds.extend([restaurant.lon!, restaurant.lat!]);
+    }
+    if (cityBounds.isEmpty())
+      cityBounds.extend([-74.2492, 40.4995]).extend([-73.7009, 40.9129]);
+    const latPad = (cityBounds.getNorth() - cityBounds.getSouth()) * 0.05;
+    const lonPad = (cityBounds.getEast() - cityBounds.getWest()) * 0.05;
+    const northWest = MercatorCoordinate.fromLngLat([
+      cityBounds.getWest() - lonPad,
+      cityBounds.getNorth() + latPad,
+    ]);
+    const southEast = MercatorCoordinate.fromLngLat([
+      cityBounds.getEast() + lonPad,
+      cityBounds.getSouth() - latPad,
+    ]);
     const hasSize = () => element.clientWidth > 0 && element.clientHeight > 0;
     const fitOptions = () => ({
-      padding: L.point(
-        Math.min(35, (element.clientWidth - 1) / 2),
-        Math.min(35, (element.clientHeight - 1) / 2),
-      ),
-      maxZoom: 16,
-      animate: false,
-    });
-    const constrainPan = () => {
-      if (!hasSize()) return;
-      const zoom = map.getZoom();
-      const northWest = map.project(navigationBounds.getNorthWest(), zoom);
-      const southEast = map.project(navigationBounds.getSouthEast(), zoom);
-      const center = northWest.add(southEast).divideBy(2);
-      const halfView = map.getSize().divideBy(2);
-      // At the overview, the viewport can be wider than NYC. Expand only those
-      // axes enough to fit it, avoiding reversed Leaflet drag limits. As users
-      // zoom in, the permitted extent contracts to the city's bounds.
-      const limits = L.bounds(northWest, southEast)
-        .extend(center.subtract(halfView).subtract([1, 1]))
-        .extend(center.add(halfView).add([1, 1]));
-      const bounds = L.latLngBounds(
-        map.unproject(limits.min!),
-        map.unproject(limits.max!),
-      );
-      map.setMaxBounds(bounds);
-      // Complete any edge correction before the first tile layer is attached.
-      map.panInsideBounds(bounds, { animate: false });
-    };
-    const updateMinimumZoom = () => {
-      // getBoundsZoom otherwise clamps to the previous minimum on a resize.
-      map.setMinZoom(0);
-      map.setMinZoom(
+      padding: Math.max(
+        0,
         Math.min(
-          16,
-          map.getBoundsZoom(
-            cityBounds,
-            false,
-            fitOptions().padding.multiplyBy(2),
-          ),
+          35,
+          (element.clientWidth - 1) / 2,
+          (element.clientHeight - 1) / 2,
         ),
-      );
+      ),
+      maxZoom: toMapZoom(16),
+      duration: 0,
+    });
+    let minimumZoom = 0;
+    // Constrain the center without forcing a zoom when the overview is wider
+    // than NYC. At street level the entire viewport stays inside the city.
+    const map = new GLMap({
+      container: element,
+      center: cityBounds.getCenter(),
+      maxZoom: toMapZoom(MAX_MAP_ZOOM),
+      maxPitch: 0,
+      dragRotate: false,
+      pitchWithRotate: false,
+      touchPitch: false,
+      renderWorldCopies: false,
+      trackResize: false,
+      transformConstrain(center, requestedZoom) {
+        const zoom = Math.max(
+          minimumZoom,
+          Math.min(toMapZoom(MAX_MAP_ZOOM), requestedZoom),
+        );
+        if (!hasSize()) return { center, zoom };
+        const point = MercatorCoordinate.fromLngLat(center);
+        const worldSize = 512 * 2 ** zoom;
+        const clampAxis = (
+          value: number,
+          start: number,
+          end: number,
+          half: number,
+        ) =>
+          end - start <= half * 2
+            ? (start + end) / 2
+            : Math.max(start + half, Math.min(end - half, value));
+        return {
+          center: new MercatorCoordinate(
+            clampAxis(
+              point.x,
+              northWest.x,
+              southEast.x,
+              element.clientWidth / worldSize / 2,
+            ),
+            clampAxis(
+              point.y,
+              northWest.y,
+              southEast.y,
+              element.clientHeight / worldSize / 2,
+            ),
+          ).toLngLat(),
+          zoom,
+        };
+      },
+    });
+    map.touchZoomRotate.disableRotation();
+    map.keyboard.disableRotation();
+    map.getCanvas().setAttribute("aria-label", "Map of matching restaurants");
+    map.addControl(new NavigationControl({ showCompass: false }), "top-left");
+    element
+      .querySelector(".maplibregl-ctrl-zoom-in")
+      ?.replaceChildren(icon("plus"));
+    element
+      .querySelector(".maplibregl-ctrl-zoom-out")
+      ?.replaceChildren(icon("minus"));
+    const updateMinimumZoom = () => {
+      minimumZoom = 0;
+      map.setMinZoom(0);
+      minimumZoom = map.cameraForBounds(cityBounds, fitOptions())?.zoom ?? 0;
+      map.setMinZoom(minimumZoom);
     };
-    const layer = L.layerGroup().addTo(map);
-    const markers = new Map<string, L.Layer>();
+    const markers = new Map<string, Marker>();
     let disposed = false;
     let initialized = false;
-    let measuredSize = L.point(0, 0);
+    let measuredSize = "";
     let frame = 0;
     let cameraFrame = 0;
     let appliedCameraKey: string | null = null;
     let reportedCamera = "";
-    let selectedMarker: L.Marker | null = null;
+    let selectedMarker: Marker | null = null;
+    let popup: Popup | null = null;
+    let popupFrame = 0;
+    const closePopup = () => {
+      cancelAnimationFrame(popupFrame);
+      popup?.remove();
+      popup = null;
+    };
     let markedSelection: string | null = null;
     let viewSequence = 0;
     let interaction = 0;
@@ -183,7 +232,7 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
     };
     const select = (id: string) => {
       interaction++;
-      map.closePopup();
+      closePopup();
       props.onSelect(id);
     };
     const fail = (error: unknown) => {
@@ -202,7 +251,7 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
       const id = props.selectedId;
       if (id === markedSelection) return;
       markedSelection = id;
-      if (selectedMarker) map.removeLayer(selectedMarker);
+      selectedMarker?.remove();
       selectedMarker = null;
       if (!id) return;
       const restaurant = restaurants.get(id);
@@ -210,7 +259,7 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
       // Selected places remain visible independently of the cluster index.
       const ordinary = markers.get(`restaurant-${id}`);
       if (ordinary) {
-        layer.removeLayer(ordinary);
+        ordinary.remove();
         markers.delete(`restaurant-${id}`);
       }
       const button = document.createElement("button");
@@ -220,24 +269,18 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
       button.setAttribute("aria-pressed", "true");
       const tooltip = document.createElement("span");
       tooltip.textContent = titleCase(restaurant.name);
-      selectedMarker = L.marker([restaurant.lat!, restaurant.lon!], {
-        title: `Selected: ${label(restaurant)}`,
-        keyboard: false,
-        zIndexOffset: 1000,
-        icon: L.divIcon({
-          className: "map-selected",
-          html: button,
-          iconSize: [38, 38],
-          iconAnchor: [19, 19],
-        }),
-      })
-        .bindTooltip(tooltip, {
-          permanent: true,
-          direction: "top",
-          offset: [0, -20],
-          className: "map-selected-tooltip",
-        })
-        .on("click", () => select(restaurant.id))
+      const markerElement = document.createElement("div");
+      markerElement.className = "map-selected";
+      markerElement.title = `Selected: ${label(restaurant)}`;
+      tooltip.className = "map-selected-tooltip";
+      markerElement.append(button, tooltip);
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        select(restaurant.id);
+      });
+      intent(button, restaurant.id);
+      selectedMarker = new Marker({ element: markerElement })
+        .setLngLat([restaurant.lon!, restaurant.lat!])
         .addTo(map);
     };
     const render = (features: MapFeature[], revision: number) => {
@@ -257,16 +300,16 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
         if (p.cluster) {
           button.textContent = clusterCountFormat.format(p.point_count);
           button.setAttribute("aria-label", `${p.point_count} restaurants`);
-          const marker = L.marker([lat, lon], {
-            keyboard: false,
-            icon: L.divIcon({
-              className: "map-cluster",
-              html: button,
-              iconSize: [44, 44],
-              iconAnchor: [22, 22],
-            }),
-          });
-          marker.on("click", () => {
+          const markerElement = document.createElement("div");
+          markerElement.className = "map-cluster";
+          markerElement.append(button);
+          const marker = new Marker({ element: markerElement }).setLngLat([
+            lon,
+            lat,
+          ]);
+          button.addEventListener("click", (event) => {
+            event.stopPropagation();
+            closePopup();
             const token = ++interaction;
             void explorer
               .expand(revision, p.cluster_id)
@@ -279,8 +322,11 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
                   props.result.revision !== revision
                 )
                   return;
-                if (expanded.zoom <= 17) {
-                  map.setView([lat, lon], expanded.zoom);
+                if (expanded.zoom <= MAX_MAP_ZOOM) {
+                  map.easeTo({
+                    center: [lon, lat],
+                    zoom: toMapZoom(expanded.zoom),
+                  });
                   return;
                 }
                 const list = document.createElement("div");
@@ -299,14 +345,57 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
                   choice.addEventListener("click", () => select(id));
                   list.append(choice);
                 }
-                L.popup({ maxWidth: 330, maxHeight: 280 })
-                  .setLatLng([lat, lon])
-                  .setContent(list)
-                  .openOn(map);
+                closePopup();
+                popup = new Popup({
+                  maxWidth: "min(330px, var(--map-popup-width))",
+                  offset: 24,
+                  anchor: "bottom",
+                })
+                  .setLngLat([lon, lat])
+                  .setDOMContent(list)
+                  .addTo(map);
+                popup
+                  .getElement()
+                  .querySelector(".maplibregl-popup-close-button")
+                  ?.replaceChildren(icon("x"));
+                popup.on("close", () => {
+                  interaction++;
+                });
+                const openedPopup = popup;
+                // MapLibre anchors popups but does not pan to reveal overflow.
+                popupFrame = requestAnimationFrame(() => {
+                  if (
+                    disposed ||
+                    popup !== openedPopup ||
+                    !openedPopup.isOpen()
+                  )
+                    return;
+                  const viewport = element.getBoundingClientRect();
+                  const box = openedPopup.getElement().getBoundingClientRect();
+                  const shift = (
+                    start: number,
+                    end: number,
+                    min: number,
+                    max: number,
+                  ) => (start < min ? start - min : end > max ? end - max : 0);
+                  const dx = shift(
+                    box.left,
+                    box.right,
+                    viewport.left + 8,
+                    viewport.right - 8,
+                  );
+                  const dy = shift(
+                    box.top,
+                    box.bottom,
+                    viewport.top + 8,
+                    viewport.bottom - 8,
+                  );
+                  if (dx || dy) map.panBy([dx, dy], { duration: 0 });
+                });
               })
               .catch(fail);
           });
-          marker.addTo(layer);
+          marker.addTo(map);
           markers.set(key, marker);
         } else {
           const restaurant = restaurants.get(p.id);
@@ -314,28 +403,23 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
           button.setAttribute("aria-label", label(restaurant));
           button.append(gradeImage(restaurant.grade));
           intent(button, restaurant.id);
-          const marker = L.marker([lat, lon], {
-            title: label(restaurant),
-            keyboard: false,
-            icon: L.divIcon({
-              className: "map-restaurant",
-              html: button,
-              iconSize: [28, 28],
-              iconAnchor: [14, 14],
-            }),
+          const markerElement = document.createElement("div");
+          markerElement.className = "map-restaurant";
+          markerElement.title = label(restaurant);
+          markerElement.append(button);
+          button.addEventListener("click", (event) => {
+            event.stopPropagation();
+            select(restaurant.id);
           });
-          const tooltip = document.createElement("span");
-          tooltip.textContent = label(restaurant);
-          marker
-            .bindTooltip(tooltip)
-            .on("click", () => select(restaurant.id))
-            .addTo(layer);
+          const marker = new Marker({ element: markerElement })
+            .setLngLat([lon, lat])
+            .addTo(map);
           markers.set(key, marker);
         }
       }
       for (const [key, marker] of markers) {
         if (!visible.has(key)) {
-          layer.removeLayer(marker);
+          marker.remove();
           markers.delete(key);
         }
       }
@@ -364,7 +448,11 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
       if (reportedCamera !== cameraKey) {
         reportedCamera = cameraKey;
         props.onCamera(
-          { lat: center.lat, lon: center.lng, zoom: map.getZoom() },
+          {
+            lat: center.lat,
+            lon: center.lng,
+            zoom: fromMapZoom(map.getZoom()),
+          },
           bounds,
         );
       }
@@ -375,7 +463,7 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
       requestedView = key;
       const sequence = ++viewSequence;
       void explorer
-        .viewport(revision, bounds, map.getZoom())
+        .viewport(revision, bounds, fromMapZoom(map.getZoom()))
         .then((value) => {
           if (
             disposed ||
@@ -409,12 +497,15 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
       const bounds = props.result.bounds;
       if (bounds) {
         if (bounds.west === bounds.east && bounds.north === bounds.south)
-          map.setView([bounds.south, bounds.west], 16, { animate: false });
+          map.jumpTo({
+            center: [bounds.west, bounds.south],
+            zoom: toMapZoom(16),
+          });
         else
           map.fitBounds(
             [
-              [bounds.south, bounds.west],
-              [bounds.north, bounds.east],
+              [bounds.west, bounds.south],
+              [bounds.east, bounds.north],
             ],
             fitOptions(),
           );
@@ -422,12 +513,19 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
     };
     const reconcileSize = () => {
       // Preserve the current center when the inline details panel changes width.
-      map.invalidateSize({ pan: true, animate: false });
-      const size = map.getSize();
-      if (size.equals(measuredSize)) return;
+      const size = `${element.clientWidth}:${element.clientHeight}`;
+      if (size === measuredSize) return;
       measuredSize = size;
+      element.style.setProperty(
+        "--map-popup-width",
+        `${Math.max(100, element.clientWidth - 24)}px`,
+      );
+      element.style.setProperty(
+        "--map-popup-height",
+        `${Math.max(40, Math.min(280, element.clientHeight - 100))}px`,
+      );
+      map.resize();
       updateMinimumZoom();
-      if (initialized) constrainPan();
     };
     const applyCameraRequest = () => {
       if (disposed || !hasSize()) return;
@@ -437,18 +535,18 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
       const selected = id ? restaurants.get(id) : null;
       if (request.view) {
         const { lat, lon, zoom } = request.view;
-        map.setView([lat, lon], zoom, { animate: false });
+        map.jumpTo({ center: [lon, lat], zoom: toMapZoom(zoom) });
       } else if (selected && hasCoordinates(selected)) {
-        map.setView(
-          [selected.lat!, selected.lon!],
-          initialized ? Math.max(17, map.getZoom()) : 17,
-          { animate: false },
-        );
+        map.jumpTo({
+          center: [selected.lon!, selected.lat!],
+          zoom: initialized
+            ? Math.max(toMapZoom(17), map.getZoom())
+            : toMapZoom(17),
+        });
       } else if (!selected || !initialized) {
         fit();
       }
       // A selected record without coordinates leaves an existing view intact.
-      constrainPan();
       appliedCameraKey = request.key;
       renderSelection();
       requestedView = "";
@@ -458,7 +556,7 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
       navigate() {
         interaction++;
         invalidateViewport();
-        map.closePopup();
+        closePopup();
         cancelAnimationFrame(cameraFrame);
         if (!initialized || !hasSize()) return;
         map.stop();
@@ -470,11 +568,58 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
       },
       refresh() {
         interaction++;
-        map.closePopup();
+        closePopup();
         if (!initialized || !hasSize()) return;
         schedule();
       },
     };
+    const colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
+    let currentStyle = "";
+    const applyStyle = () => {
+      const style = colorScheme.matches ? mapStyles.dark : mapStyles.light;
+      if (style === currentStyle) return;
+      currentStyle = style;
+      tileError = false;
+      renderStatus();
+      map.setStyle(style, {
+        transformStyle: (_previous, next) => ({
+          ...next,
+          layers: next.layers.map((layer) => {
+            // Bright's data includes POI classes absent from its sprite sheet.
+            // Keep their labels and use its generic symbol when an icon is missing.
+            if (layer.type !== "symbol" || !layer.id.startsWith("poi"))
+              return layer;
+            const image = layer.layout?.["icon-image"];
+            if (!Array.isArray(image)) return layer;
+            return {
+              ...layer,
+              layout: {
+                ...layer.layout,
+                "icon-image": [
+                  "coalesce",
+                  ["image", image],
+                  ["image", "circle"],
+                ],
+              },
+            };
+          }),
+        }),
+      });
+    };
+    const themeChanged = () => {
+      if (!disposed && initialized) applyStyle();
+    };
+    colorScheme.addEventListener("change", themeChanged);
+    map.on("error", () => {
+      if (disposed) return;
+      tileError = true;
+      renderStatus();
+    });
+    map.on("style.load", () => {
+      if (disposed) return;
+      tileError = false;
+      renderStatus();
+    });
     const resume = () => {
       // A hidden initial mount waits for the observer, without polling frames.
       if (disposed || !hasSize()) return;
@@ -484,18 +629,8 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
         schedule();
         return;
       }
-      L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        attribution:
-          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-        maxZoom: 19,
-      })
-        .on("tileerror", () => {
-          if (!disposed) {
-            tileError = true;
-            renderStatus();
-          }
-        })
-        .addTo(map);
+      // Fit the data first, then request only the visible vector basemap.
+      applyStyle();
       initialized = true;
       // Discard work for the previous view as soon as movement starts. Keep
       // its markers until a response for the settled camera is ready.
@@ -510,7 +645,6 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
       });
       map.on("zoomend", () => {
         zooming = false;
-        constrainPan();
         schedule();
       });
       map.on("moveend", () => {
@@ -518,7 +652,7 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
         schedule();
       });
       map.on("resize", schedule);
-      map.on("popupclose click", () => {
+      map.on("click", () => {
         interaction++;
       });
       update();
@@ -548,6 +682,11 @@ export function createRestaurantMap(host: HTMLElement, initial: MapProps) {
         cancelAnimationFrame(frame);
         cancelAnimationFrame(cameraFrame);
         observer.disconnect();
+        colorScheme.removeEventListener("change", themeChanged);
+        closePopup();
+        selectedMarker?.remove();
+        for (const marker of markers.values()) marker.remove();
+        markers.clear();
         map.remove();
       },
     };

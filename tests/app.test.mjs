@@ -6,7 +6,7 @@ import { Window } from "happy-dom";
 import { fileURLToPath } from "node:url";
 
 // Keep the real app, navigation and child views together. Only external work
-// (data, worker queries and Leaflet) is controlled so races are deterministic.
+// (data, worker queries and MapLibre) is controlled so races are deterministic.
 const stubs = {
   "./data/client": `
     export const loadData = (...args) => globalThis.appTest.loadData(...args);

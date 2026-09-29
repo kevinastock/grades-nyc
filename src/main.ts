@@ -1,4 +1,4 @@
-// Import only Oat primitives used by this app; Leaflet styles load with the map.
+// Import only Oat primitives used by this app; MapLibre styles load with the map.
 import "@knadh/oat/css/00-base.css";
 import "@knadh/oat/css/01-theme.css";
 import "@knadh/oat/css/button.css";

@@ -15,11 +15,10 @@
   "dependencies": {
     "@knadh/oat": "0.8.0",
     "fuse.js": "^7.1.0",
-    "leaflet": "^1.9.4",
+    "maplibre-gl": "^6.11.2",
     "supercluster": "^9.1.0"
   },
   "devDependencies": {
-    "@types/leaflet": "^1.9.20",
     "@types/node": "^24.5.0",
     "@types/supercluster": "^7.1.3",
     "esbuild": "^0.28.2",

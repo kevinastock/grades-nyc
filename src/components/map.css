@@ -1,4 +1,4 @@
-/* Leaflet needs a sized canvas and overlay positioning outside document flow. */
+/* The WebGL canvas and geographic overlays share a sized, isolated container. */
 .map-wrap {
   position: relative;
   isolation: isolate;
@@ -9,21 +9,35 @@
 .map {
   width: 100%;
   height: 100%;
-  z-index: 0;
+  z-index: auto;
+  background: var(--background);
 }
 .map-tools {
   position: absolute;
-  z-index: 450;
+  z-index: 2;
   top: 10px;
   right: 10px;
   align-items: flex-end;
 }
 .map-message {
   position: absolute;
-  z-index: 450;
+  z-index: 4;
   bottom: 25px;
   left: 12px;
   right: 12px;
+}
+.map-cluster {
+  width: 44px;
+  height: 44px;
+}
+.map-restaurant {
+  width: 28px;
+  height: 28px;
+}
+.map-selected {
+  width: 38px;
+  height: 38px;
+  z-index: 1;
 }
 /* Circular geographic markers are the only custom button appearance. */
 .map-cluster > button,
@@ -58,16 +72,95 @@
   outline-offset: 5px;
 }
 .map-selected-tooltip {
+  position: absolute;
+  bottom: calc(100% + 9px);
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-small);
+  background: var(--card);
+  color: var(--card-foreground);
+  box-shadow: var(--shadow-small);
+  text-align: center;
   width: max-content;
   max-width: 220px;
   white-space: normal;
   font-weight: 650;
 }
-.leaflet-popup-content-wrapper,
-.leaflet-popup-tip,
-.leaflet-tooltip {
+.map .maplibregl-ctrl-group,
+.map .maplibregl-ctrl-attrib,
+.map .maplibregl-popup-content {
   background: var(--card);
   color: var(--card-foreground);
+}
+.map .maplibregl-ctrl-group button,
+.map .maplibregl-popup-close-button {
+  min-height: 0;
+  padding: 0;
+  color: inherit;
+  border-radius: 0;
+}
+.map .maplibregl-ctrl-group button:hover,
+.map .maplibregl-popup-close-button:hover {
+  background: var(--accent);
+}
+/* Oat's global accordion rules must not enlarge the attribution disclosure. */
+.map .maplibregl-ctrl-attrib {
+  border: 0;
+}
+.map .maplibregl-ctrl-attrib-inner {
+  margin: 0;
+  animation: none;
+}
+.map .maplibregl-ctrl-attrib-button::after {
+  content: none;
+}
+.map .maplibregl-ctrl-attrib a {
+  color: inherit;
+}
+.map .maplibregl-ctrl-attrib summary.maplibregl-ctrl-attrib-button {
+  background-color: white;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+}
+.map .maplibregl-popup {
+  z-index: 3;
+}
+.map .maplibregl-popup-content {
+  padding: 30px 12px 12px;
+  border-radius: var(--radius-medium);
+}
+.map .maplibregl-popup-close-button {
+  width: 28px;
+  height: 28px;
+}
+.map .maplibregl-popup-anchor-bottom .maplibregl-popup-tip,
+.map .maplibregl-popup-anchor-bottom-left .maplibregl-popup-tip,
+.map .maplibregl-popup-anchor-bottom-right .maplibregl-popup-tip {
+  border-top-color: var(--card);
+}
+.map .maplibregl-popup-anchor-top .maplibregl-popup-tip,
+.map .maplibregl-popup-anchor-top-left .maplibregl-popup-tip,
+.map .maplibregl-popup-anchor-top-right .maplibregl-popup-tip {
+  border-bottom-color: var(--card);
+}
+.map .maplibregl-popup-anchor-left .maplibregl-popup-tip {
+  border-right-color: var(--card);
+}
+.map .maplibregl-popup-anchor-right .maplibregl-popup-tip {
+  border-left-color: var(--card);
+}
+.map-place-list {
+  max-height: var(--map-popup-height, 280px);
+  overflow-y: auto;
+}
+@media (prefers-reduced-motion: reduce) {
+  .map button {
+    transition: none;
+  }
 }
 .map-place-list button {
   height: auto;

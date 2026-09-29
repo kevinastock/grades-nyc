@@ -91,7 +91,7 @@ test("viewport requests retain all candidates, bound map features, and reject st
   assert.equal(v.features[0].properties.point_count, 2);
   const id = v.features[0].properties.cluster_id,
     expanded = e.expand(1, id);
-  assert.ok(expanded.zoom > 17);
+  assert.equal(expanded.zoom, 20);
   assert.deepEqual(new Set(expanded.ids), new Set(["001", "002"]));
   const emptyMap = e.viewport(
     1,
@@ -105,6 +105,72 @@ test("viewport requests retain all candidates, bound map features, and reject st
   assert.equal(e.viewport(1, bounds, 16), null);
   assert.equal(e.expand(1, id), null);
   assert.deepEqual(e.viewport(2, bounds, 16).features, []);
+});
+
+// Public map zooms use a 256px world; longitude gives an exact horizontal
+// screen-space distance without depending on a particular latitude.
+function storefronts(pixels, zoom) {
+  const longitudeOffset = (pixels * 360) / (256 * 2 ** zoom);
+  return [rows[0], { ...rows[1], lon: rows[0].lon + longitudeOffset }];
+}
+
+test("adjacent storefronts 36 pixels apart separate at street zoom while remaining clustered one level out", () => {
+  const e = createExplorer(storefronts(36, 17));
+  e.query(1, criteria);
+  const overview = e.viewport(1, bounds, 16);
+  assert.equal(overview.features.length, 1);
+  assert.equal(overview.features[0].properties.cluster, true);
+  assert.equal(overview.features[0].properties.point_count, 2);
+  const street = e.viewport(1, bounds, 17);
+  assert.equal(street.visibleMapped, 2);
+  assert.equal(street.features.length, 2);
+  assert.ok(street.features.every((feature) => !feature.properties.cluster));
+  assert.deepEqual(
+    new Set(street.features.map((feature) => feature.properties.id)),
+    new Set(["001", "002"]),
+  );
+});
+
+test("nearby storefronts expand to the maximum navigable zoom before exposing individual markers", () => {
+  const e = createExplorer(storefronts(20, 18));
+  e.query(1, criteria);
+  const before = e.viewport(1, bounds, 18);
+  assert.equal(before.features.length, 1);
+  assert.equal(before.features[0].properties.cluster, true);
+  const expanded = e.expand(1, before.features[0].properties.cluster_id);
+  assert.equal(expanded.zoom, 19);
+  assert.deepEqual(
+    expanded.ids,
+    [],
+    "a navigable expansion does not open the place chooser",
+  );
+  const after = e.viewport(1, bounds, expanded.zoom);
+  assert.equal(after.features.length, 2);
+  assert.ok(after.features.every((feature) => !feature.properties.cluster));
+  assert.deepEqual(
+    new Set(after.features.map((feature) => feature.properties.id)),
+    new Set(["001", "002"]),
+  );
+});
+
+test("coincident places stay clustered at maximum zoom and expose their leaf IDs beyond it", () => {
+  const e = createExplorer(rows.slice(0, 2));
+  e.query(1, criteria);
+  const viewport = e.viewport(1, bounds, 19);
+  assert.equal(viewport.features.length, 1);
+  assert.equal(viewport.features[0].properties.cluster, true);
+  assert.equal(viewport.features[0].properties.point_count, 2);
+  const id = viewport.features[0].properties.cluster_id;
+  const expanded = e.expand(1, id);
+  assert.equal(expanded.zoom, 20);
+  assert.deepEqual(new Set(expanded.ids), new Set(["001", "002"]));
+  e.query(2, { ...criteria, grade: "none" });
+  assert.equal(
+    e.expand(1, id),
+    null,
+    "cluster IDs from the earlier revision remain invalid",
+  );
+  assert.equal(e.viewport(1, bounds, 19), null);
 });
 
 test("Unknown borough results remain visible when none of them has a usable location", () => {

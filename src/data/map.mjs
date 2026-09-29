@@ -1,5 +1,8 @@
 import { hasCoordinates } from "./model.mjs";
 
+// Public camera/worker zoom uses a 256px world; MapLibre converts at its boundary.
+export const MAX_MAP_ZOOM = 19;
+
 // A restaurant without a usable pin cannot be ruled out by the map viewport.
 export function inMapBounds(restaurant, bounds) {
   if (!bounds || !hasCoordinates(restaurant)) return true;

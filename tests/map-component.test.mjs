@@ -4,12 +4,13 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { Window } from "happy-dom";
+import { createExpression, latest } from "@maplibre/maplibre-gl-style-spec";
 
 const project = fileURLToPath(new URL("..", import.meta.url));
 const bundle = await build({
   stdin: {
     contents:
-      'export { createRestaurantMap } from "./src/components/RestaurantMap.ts"; export { default as L } from "leaflet";',
+      'export { createRestaurantMap } from "./src/components/RestaurantMap.ts"; export { Map, workerUrls, Popup } from "maplibre-gl";',
     resolveDir: project,
   },
   bundle: true,
@@ -19,30 +20,45 @@ const bundle = await build({
   loader: { ".css": "empty", ".svg": "text" },
   plugins: [
     {
-      name: "isolate-data-loading",
+      name: "isolate-rendering-and-data-loading",
       setup(b) {
         b.onLoad({ filter: /\.svg$/ }, async ({ path, suffix }) =>
           suffix === "?url"
             ? { contents: await readFile(path), loader: "dataurl" }
             : undefined,
         );
+        b.onResolve({ filter: /^maplibre-gl$/ }, () => ({
+          path: fileURLToPath(
+            new URL("./helpers/maplibre-stub.mjs", import.meta.url),
+          ),
+        }));
+        b.onResolve({ filter: /\?worker&url$/ }, () => ({
+          path: "worker",
+          namespace: "stub",
+        }));
         b.onResolve({ filter: /^\.\.\/data\/client$/ }, () => ({
           path: "client",
           namespace: "stub",
         }));
-        b.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
-          contents: "export const prefetchInspections = () => {};",
+        b.onLoad({ filter: /.*/, namespace: "stub" }, ({ path }) => ({
+          contents:
+            path === "worker"
+              ? 'export default "/assets/maplibre-worker.mjs";'
+              : "export const prefetchInspections = () => {};",
         }));
       },
     },
   ],
 });
 
-async function harness(t, overrides = {}) {
+// These integration tests cover our MapLibre lifecycle. WebGL painting,
+// external tile availability and CSS layout require a browser smoke check.
+async function harness(
+  t,
+  overrides = {},
+  { hidden = false, dark = false } = {},
+) {
   const w = new Window({ url: "http://localhost/" });
-  w.WebKitCSSMatrix = class {
-    m11 = 1;
-  };
   const frames = new Map();
   let frameId = 0;
   w.requestAnimationFrame = (callback) => {
@@ -50,36 +66,52 @@ async function harness(t, overrides = {}) {
     return frameId;
   };
   w.cancelAnimationFrame = (id) => frames.delete(id);
-  // Drive zoom completion by its normal transition event, never wall-clock waits.
-  const timers = new Map();
-  let timerId = 0;
-  w.setTimeout = (callback) => {
-    timers.set(++timerId, callback);
-    return timerId;
+  const mediaListeners = new Set();
+  const media = {
+    matches: dark,
+    media: "(prefers-color-scheme: dark)",
+    addEventListener(type, callback) {
+      if (type === "change") mediaListeners.add(callback);
+    },
+    removeEventListener(type, callback) {
+      if (type === "change") mediaListeners.delete(callback);
+    },
+    addListener(callback) {
+      mediaListeners.add(callback);
+    },
+    removeListener(callback) {
+      mediaListeners.delete(callback);
+    },
   };
-  w.clearTimeout = (id) => timers.delete(id);
+  w.matchMedia = () => media;
+  const observers = [];
   w.ResizeObserver = class {
-    observe() {}
-    disconnect() {}
+    constructor(callback) {
+      this.callback = callback;
+      observers.push(this);
+    }
+    observe(element) {
+      this.element = element;
+    }
+    disconnect() {
+      this.disconnected = true;
+    }
   };
+  const size = { width: hidden ? 0 : 884, height: hidden ? 0 : 550 };
   Object.defineProperties(w.HTMLElement.prototype, {
     clientWidth: {
       get() {
-        return this.classList.contains("map") ? 884 : 0;
+        return this.classList.contains("map") ? size.width : 0;
       },
     },
     clientHeight: {
       get() {
-        return this.classList.contains("map") ? 550 : 0;
+        return this.classList.contains("map") ? size.height : 0;
       },
     },
   });
   w.eval(bundle.outputFiles[0].text);
-  const { createRestaurantMap, L } = w.Subject;
-  let map;
-  L.Map.addInitHook(function () {
-    map = this;
-  });
+  const { createRestaurantMap, Map: GLMap, workerUrls, Popup } = w.Subject;
   const rows = [
     { id: "central", lat: 40.74, lon: -73.97 },
     { id: "nearby", lat: 40.741, lon: -73.971 },
@@ -93,15 +125,23 @@ async function harness(t, overrides = {}) {
   }));
   const restaurants = new Map(rows.map((row) => [row.id, row]));
   const requests = [];
+  const expansions = [];
   const accepted = [];
+  const cameras = [];
   const errors = [];
+  const selections = [];
   const host = w.document.createElement("main");
   w.document.body.append(host);
   const props = {
     explorer: {
       viewport(revision, bounds, zoom) {
+        return new Promise((resolve, reject) =>
+          requests.push({ revision, bounds, zoom, resolve, reject }),
+        );
+      },
+      expand(revision, id) {
         return new Promise((resolve) =>
-          requests.push({ revision, bounds, zoom, resolve }),
+          expansions.push({ revision, id, resolve }),
         );
       },
     },
@@ -115,8 +155,12 @@ async function harness(t, overrides = {}) {
       key: "search",
       view: { lat: 40.74, lon: -73.97, zoom: 14 },
     },
-    onCamera() {},
-    onSelect() {},
+    onCamera(camera, bounds) {
+      cameras.push({ camera, bounds });
+    },
+    onSelect(id) {
+      selections.push(id);
+    },
     onViewport(value) {
       accepted.push(value);
     },
@@ -138,11 +182,9 @@ async function harness(t, overrides = {}) {
     await Promise.resolve();
   }
   async function reply(request, ids) {
-    request.resolve({
-      revision: request.revision,
-      ids,
-      visibleMapped: ids.length,
-      features: ids.map((id) => {
+    return replyFeatures(
+      request,
+      ids.map((id) => {
         const row = restaurants.get(id);
         return {
           type: "Feature",
@@ -150,48 +192,64 @@ async function harness(t, overrides = {}) {
           properties: { cluster: false, id },
         };
       }),
+      ids,
+    );
+  }
+  async function replyFeatures(request, features, ids = []) {
+    request.resolve({
+      revision: request.revision,
+      ids,
+      visibleMapped: ids.length,
+      features,
     });
     await Promise.resolve();
   }
   async function startZoom(direction) {
-    host.querySelector(`.leaflet-control-zoom-${direction}`).click();
+    host.querySelector(`.maplibregl-ctrl-zoom-${direction}`).click();
     await frame();
-    assert.ok(
-      host.querySelector(".leaflet-zoom-anim"),
-      "the real Leaflet zoom animation started",
-    );
+    assert.equal(map.isMoving(), true);
   }
   async function finishZoom() {
-    const event = new w.Event("transitionend");
-    Object.defineProperty(event, "propertyName", { value: "transform" });
-    host.querySelector(".leaflet-proxy").dispatchEvent(event);
+    map.finishMove();
     await frame();
-    assert.equal(host.querySelector(".leaflet-zoom-anim"), null);
+    assert.equal(map.isMoving(), false);
   }
   function markers() {
-    const found = [];
-    map.eachLayer((layer) => {
-      if (layer instanceof L.Marker) found.push(layer);
-    });
-    return found;
+    return [...map.markers];
   }
-  function assertPositions() {
+  function assertAnchors() {
     assert.equal(markers().length, 2);
     for (const marker of markers()) {
-      const expected = map.latLngToLayerPoint(marker.getLatLng()).round();
-      assert.ok(
-        L.DomUtil.getPosition(marker.getElement()).equals(expected),
-        "marker follows the settled camera",
+      const id = marker.getLngLat().lat === 40.74 ? "central" : "nearby";
+      const row = restaurants.get(id);
+      assert.equal(
+        marker.getLngLat().lat,
+        row.lat,
+        "retained marker keeps its geographic anchor",
       );
-      const point = map.latLngToContainerPoint(marker.getLatLng());
+      assert.equal(marker.getLngLat().lng, row.lon);
+      assert.ok(marker.getElement().isConnected);
       assert.ok(
-        point.x >= 0 && point.x <= 884 && point.y >= 0 && point.y <= 550,
-        "central marker remains onscreen",
+        map.getBounds().contains(marker.getLngLat()),
+        "central marker remains within the current viewport",
       );
     }
   }
+  async function resize(width, height) {
+    size.width = width;
+    size.height = height;
+    for (const observer of observers)
+      if (!observer.disconnected) observer.callback([]);
+    await frame();
+  }
+  function setDark(value) {
+    media.matches = value;
+    for (const callback of [...mediaListeners])
+      callback({ matches: value, media: media.media });
+  }
   await frame();
-  assert.equal(requests.length, 1);
+  const map = GLMap.instances.at(-1);
+  assert.equal(requests.length, hidden ? 0 : 1);
   return {
     host,
     view,
@@ -199,12 +257,24 @@ async function harness(t, overrides = {}) {
     map,
     requests,
     accepted,
+    cameras,
+    errors,
+    selections,
     frame,
     reply,
+    replyFeatures,
     startZoom,
     finishZoom,
     markers,
-    assertPositions,
+    assertAnchors,
+    resize,
+    setDark,
+    observers,
+    mediaListeners,
+    frames,
+    workerUrls,
+    expansions,
+    Popup,
   };
 }
 
@@ -218,13 +288,13 @@ test("the results control exposes its state and updates without resetting the ma
   assert.ok(toggle.querySelector("svg.feather-list"));
   toggle.click();
   assert.equal(toggles, 1);
-  const canvas = h.map.getContainer();
+  const canvas = h.map.getCanvas();
   const center = h.map.getCenter();
   h.view.update({ ...h.props, resultsVisible: true });
   assert.equal(toggle.getAttribute("aria-label"), "Hide search results");
   assert.equal(toggle.getAttribute("aria-expanded"), "true");
-  assert.equal(h.map.getContainer(), canvas);
-  assert.ok(h.map.getCenter().equals(center));
+  assert.equal(h.map.getCanvas(), canvas);
+  assert.deepEqual(h.map.getCenter(), center);
   assert.equal(h.requests.length, 1);
   h.view.update({ ...h.props, showResultsToggle: false });
   assert.equal(toggle.hidden, true);
@@ -240,31 +310,28 @@ test("viewport responses from before the next zoom cannot clear the displayed re
   const staleRequest = h.requests[1];
   await h.startZoom("out");
   await h.reply(staleRequest, []);
-  assert.equal(
-    h.markers().length,
-    originalMarkers.length,
-    "late results must not clear the layer during another zoom",
-  );
-  assert.ok(
-    h.markers().every((marker, index) => marker === originalMarkers[index]),
-    "late results must retain the displayed layers",
+  assert.deepEqual(
+    h.markers(),
+    originalMarkers,
+    "late results retain displayed marker instances while moving",
   );
   assert.equal(h.accepted.length, 1);
   await h.finishZoom();
   assert.equal(
     h.requests.length,
     3,
-    "the settled zoom refreshes without another action",
+    "settling the zoom refreshes without another action",
   );
   await h.reply(h.requests[2], ["central", "nearby"]);
-  h.assertPositions();
+  h.assertAnchors();
 });
 
 test("returning to the same viewport retries a request invalidated by movement", async (t) => {
   const h = await harness(t);
   const original = h.requests[0];
-  h.map.panBy([40, 0], { animate: false });
-  h.map.panBy([-40, 0], { animate: false });
+  const center = h.map.getCenter();
+  h.map.jumpTo({ center: [center.lng + 0.001, center.lat] });
+  h.map.jumpTo({ center });
   await h.frame();
   assert.equal(
     h.requests.length,
@@ -275,30 +342,337 @@ test("returning to the same viewport retries a request invalidated by movement",
   assert.equal(h.requests[1].zoom, original.zoom);
   await h.reply(h.requests[1], ["central", "nearby"]);
   await h.reply(original, []);
-  h.assertPositions();
+  h.assertAnchors();
   assert.equal(
     h.accepted.length,
     1,
-    "the invalidated response is ignored even after the fresh response",
+    "invalidated response stays ignored after the fresh response",
   );
 });
 
-test("zoom buttons keep retained markers positioned through repeated zooms", async (t) => {
+test("zoom buttons retain marker instances and geographic anchors through repeated zooms", async (t) => {
   const h = await harness(t);
   await h.reply(h.requests[0], ["central", "nearby"]);
   const originalMarkers = h.markers();
-  h.assertPositions();
+  h.assertAnchors();
   for (const direction of ["in", "in", "out", "out"]) {
     const count = h.requests.length;
     await h.startZoom(direction);
     await h.finishZoom();
     assert.equal(h.requests.length, count + 1);
-    h.assertPositions();
+    h.assertAnchors();
     await h.reply(h.requests.at(-1), ["central", "nearby"]);
-    assert.ok(
-      h.markers().every((marker, index) => marker === originalMarkers[index]),
-      "ordinary zooms reuse the existing marker layers",
+    assert.deepEqual(
+      h.markers(),
+      originalMarkers,
+      "ordinary zooms reuse existing markers",
     );
-    h.assertPositions();
+    h.assertAnchors();
   }
+});
+
+test("MapLibre uses longitude first while worker and saved cameras retain their original zoom scale", async (t) => {
+  const h = await harness(t);
+  assert.equal(h.map.getCenter().lng, -73.97);
+  assert.equal(h.map.getCenter().lat, 40.74);
+  assert.equal(
+    h.map.getZoom(),
+    13,
+    "512-pixel MapLibre zoom is one below the public 256-pixel zoom",
+  );
+  assert.equal(h.requests[0].zoom, 14);
+  assert.equal(h.cameras[0].camera.zoom, 14);
+  assert.equal(h.cameras[0].camera.lon, -73.97);
+  assert.equal(h.workerUrls.at(-1), "/assets/maplibre-worker.mjs");
+  await h.startZoom("in");
+  await h.finishZoom();
+  assert.equal(h.map.getZoom(), 14);
+  assert.equal(h.requests.at(-1).zoom, 15);
+  assert.equal(h.cameras.at(-1).camera.zoom, 15);
+});
+
+test("changing the system theme replaces only the style and preserves camera and selection", async (t) => {
+  const h = await harness(t, { selectedId: "central" });
+  await h.reply(h.requests[0], ["central", "nearby"]);
+  const selected = h.host.querySelector(".map-selected");
+  const camera = h.map.getCenter();
+  const zoom = h.map.getZoom();
+  const markers = h.markers();
+  assert.ok(selected.querySelector('[aria-pressed="true"]'));
+  assert.ok(selected.querySelector(".map-selected-tooltip"));
+  assert.equal(
+    h.map.styles.at(-1),
+    "https://tiles.openfreemap.org/styles/bright",
+  );
+  assert.equal(
+    h.host.querySelectorAll(".map-restaurant").length,
+    1,
+    "selection is not duplicated as an ordinary marker",
+  );
+  h.setDark(true);
+  assert.equal(
+    h.map.styles.at(-1),
+    "https://tiles.openfreemap.org/styles/fiord",
+  );
+  assert.deepEqual(h.map.getCenter(), camera);
+  assert.equal(h.map.getZoom(), zoom);
+  assert.deepEqual(h.markers(), markers);
+  assert.equal(h.host.querySelector(".map-selected"), selected);
+  assert.equal(
+    h.requests.length,
+    1,
+    "changing only the basemap does not restart the restaurant query",
+  );
+  selected.querySelector("button").click();
+  assert.deepEqual(h.selections, ["central"]);
+  h.setDark(false);
+  assert.equal(
+    h.map.styles.at(-1),
+    "https://tiles.openfreemap.org/styles/bright",
+  );
+});
+
+test("a dark initial preference starts with Fiord", async (t) => {
+  const h = await harness(t, {}, { dark: true });
+  assert.equal(
+    h.map.styles.at(-1),
+    "https://tiles.openfreemap.org/styles/fiord",
+  );
+});
+
+test("POI sprites retain available icons and use a circle for missing icons without changing other layers", async (t) => {
+  const h = await harness(t);
+  const icon = ["get", "class"];
+  const poi = {
+    id: "poi-level-1",
+    type: "symbol",
+    source: "openmaptiles",
+    layout: {
+      "icon-image": icon,
+      "text-field": ["get", "name"],
+      "text-size": 12,
+    },
+  };
+  const road = {
+    id: "road-label",
+    type: "symbol",
+    layout: { "icon-image": ["get", "shield"] },
+  };
+  const fixedPoi = {
+    id: "poi-fixed",
+    type: "symbol",
+    layout: { "icon-image": "cafe" },
+  };
+  const background = { id: "background", type: "background" };
+  const original = {
+    version: 8,
+    sources: { openmaptiles: {} },
+    sprite: "https://example.com/sprite",
+    layers: [poi, road, fixedPoi, background],
+  };
+  const transformed = h.map.styleOptions
+    .at(-1)
+    .transformStyle(undefined, original);
+  assert.equal(transformed.sources, original.sources);
+  assert.equal(transformed.sprite, original.sprite);
+  assert.equal(transformed.layers[1], road);
+  assert.equal(transformed.layers[2], fixedPoi);
+  assert.equal(transformed.layers[3], background);
+  assert.equal(
+    poi.layout["icon-image"],
+    icon,
+    "the source style stays untouched",
+  );
+  assert.equal(
+    transformed.layers[0].layout["text-field"],
+    poi.layout["text-field"],
+  );
+  assert.equal(transformed.layers[0].layout["text-size"], 12);
+  const parsed = createExpression(
+    transformed.layers[0].layout["icon-image"],
+    "icon-image",
+    latest.layout_symbol["icon-image"],
+  );
+  assert.equal(
+    parsed.result,
+    "success",
+    "the fallback is a valid MapLibre icon expression",
+  );
+  const evaluate = (kind, images) =>
+    parsed.value.evaluateWithoutErrorHandling(
+      { zoom: 14 },
+      { type: "Point", properties: { class: kind } },
+      undefined,
+      undefined,
+      images,
+    );
+  assert.equal(
+    evaluate("cafe", ["cafe", "circle"]).name,
+    "cafe",
+    "an available POI icon keeps its original sprite",
+  );
+  const fallback = evaluate("missing-poi-class", ["cafe", "circle"]);
+  assert.equal(fallback.name, "circle");
+  assert.equal(fallback.available, true);
+});
+
+test("hidden mounts defer viewport requests until measurable and preserve the camera after hiding", async (t) => {
+  const h = await harness(t, {}, { hidden: true });
+  assert.equal(h.frames.size, 0, "hidden map does not poll animation frames");
+  await h.resize(884, 550);
+  assert.equal(h.requests.length, 1);
+  await h.reply(h.requests[0], ["central", "nearby"]);
+  const camera = h.map.getCenter();
+  const zoom = h.map.getZoom();
+  const resizeCalls = h.map.resizeCalls;
+  await h.resize(0, 0);
+  assert.equal(
+    h.map.resizeCalls,
+    resizeCalls,
+    "a zero-size observation does not resize the map",
+  );
+  assert.equal(h.requests.length, 1);
+  await h.resize(600, 550);
+  assert.ok(h.map.resizeCalls > resizeCalls);
+  assert.deepEqual(h.map.getCenter(), camera);
+  assert.equal(h.map.getZoom(), zoom);
+  assert.equal(h.requests.length, 2);
+  await h.reply(h.requests.at(-1), ["central", "nearby"]);
+  h.assertAnchors();
+});
+
+test("destroy disconnects observers, theme listeners and pending viewport work", async (t) => {
+  const h = await harness(t);
+  const pending = h.requests[0];
+  const styles = h.map.styles.length;
+  h.view.destroy();
+  assert.equal(h.map.removed, true);
+  assert.ok(h.observers.every((observer) => observer.disconnected));
+  assert.equal(h.mediaListeners.size, 0);
+  assert.equal(h.frames.size, 0);
+  assert.equal(h.host.children.length, 0);
+  await h.reply(pending, ["central", "nearby"]);
+  h.setDark(true);
+  await h.resize(900, 600);
+  h.view.update({ ...h.props, selectedId: "nearby" });
+  assert.equal(h.accepted.length, 0);
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.map.styles.length, styles);
+  assert.equal(h.host.children.length, 0);
+});
+
+test("selecting a place without coordinates leaves the camera intact and explains the missing marker", async (t) => {
+  const h = await harness(t, { selectedId: "central" });
+  h.props.restaurants.set("missing", {
+    id: "missing",
+    name: "Missing Place",
+    grade: "B",
+    address: "2 Main Street",
+  });
+  const center = h.map.getCenter();
+  const zoom = h.map.getZoom();
+  assert.ok(h.host.querySelector(".map-selected"));
+  h.view.update({
+    ...h.props,
+    selectedId: "missing",
+    cameraRequest: { key: "missing-selection", view: null },
+  });
+  await h.frame();
+  await h.frame();
+  await h.frame();
+  assert.deepEqual(h.map.getCenter(), center);
+  assert.equal(h.map.getZoom(), zoom);
+  assert.equal(h.host.querySelector(".map-selected"), null);
+  const status = h.host.querySelector('[role="alert"]');
+  assert.equal(status.hidden, false);
+  assert.equal(status.textContent, "Missing Place has no map location.");
+  assert.equal(
+    h.requests.length,
+    2,
+    "the new selection still refreshes the visible results",
+  );
+});
+
+const cluster = {
+  type: "Feature",
+  geometry: { type: "Point", coordinates: [-73.97, 40.74] },
+  properties: { cluster: true, cluster_id: 42, point_count: 2 },
+};
+
+test("cluster expansion reaches maximum navigable zoom and ignores replies after a newer interaction", async (t) => {
+  const h = await harness(t);
+  await h.replyFeatures(h.requests[0], [cluster]);
+  const button = h.host.querySelector(".map-cluster button");
+  assert.equal(button.getAttribute("aria-label"), "2 restaurants");
+  button.click();
+  assert.equal(h.expansions[0].revision, 1);
+  assert.equal(h.expansions[0].id, 42);
+  h.expansions[0].resolve({ zoom: 19, ids: [] });
+  await Promise.resolve();
+  assert.equal(h.map.getZoom(), 18);
+  assert.equal(h.map.getCenter().lng, -73.97);
+  assert.equal(h.map.getCenter().lat, 40.74);
+  assert.equal(h.host.querySelector(".map-place-list"), null);
+  await h.finishZoom();
+  button.click();
+  h.map.fire("click");
+  h.expansions[1].resolve({ zoom: 20, ids: ["central", "nearby"] });
+  await Promise.resolve();
+  assert.equal(h.host.querySelector(".map-place-list"), null);
+  assert.equal(h.map.getZoom(), 18);
+});
+
+test("coincident places open a selectable popup that pans into view and closes on selection", async (t) => {
+  const h = await harness(t);
+  await h.replyFeatures(h.requests[0], [cluster]);
+  h.host.querySelector(".map-cluster button").click();
+  h.expansions[0].resolve({ zoom: 20, ids: ["central", "nearby"] });
+  await Promise.resolve();
+  const popup = h.Popup.instances.at(-1);
+  assert.ok(popup.isOpen());
+  assert.equal(popup.lngLat.lng, -73.97);
+  assert.equal(popup.lngLat.lat, 40.74);
+  const list = h.host.querySelector(".map-place-list");
+  assert.equal(list.querySelector("strong").textContent, "2 places here");
+  assert.equal(list.querySelectorAll("button").length, 2);
+  assert.ok(
+    popup
+      .getElement()
+      .querySelector(".maplibregl-popup-close-button svg.feather-x"),
+  );
+  h.map.getContainer().getBoundingClientRect = () => ({
+    left: 0,
+    top: 0,
+    right: 884,
+    bottom: 550,
+  });
+  popup.getElement().getBoundingClientRect = () => ({
+    left: 200,
+    top: -40,
+    right: 500,
+    bottom: 200,
+  });
+  await h.frame();
+  assert.equal(
+    h.map.pans.length,
+    1,
+    "popup outside the top edge causes a reveal pan",
+  );
+  assert.equal(h.map.pans[0][0], 0);
+  assert.equal(h.map.pans[0][1], -48);
+  list.querySelector("button").click();
+  assert.deepEqual(h.selections, ["central"]);
+  assert.equal(popup.isOpen(), false);
+  assert.equal(h.host.querySelector(".map-place-list"), null);
+});
+
+test("basemap failures show an alert which clears after the replacement style loads", async (t) => {
+  const h = await harness(t);
+  const status = h.host.querySelector('[role="alert"]');
+  assert.equal(status.hidden, true);
+  h.map.fire("error", { error: new Error("Tile request failed") });
+  assert.equal(status.hidden, false);
+  assert.equal(status.textContent, "Map tiles unavailable.");
+  h.map.fire("style.load");
+  assert.equal(status.hidden, true);
 });
